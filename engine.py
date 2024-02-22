@@ -49,7 +49,7 @@ def read_pdf_info(pdf_file: dict) -> dict:
 def save_to_csv(pdf_list: list, filename: str) -> None:
     with open(filename, "w", encoding='utf-8') as f:
         writer = csv.DictWriter(
-            f, fieldnames=["fullname", "size", "pages", "info"])
+            f, fieldnames=["fullname", "size", "pages", "info"], dialect="excel")
         writer.writeheader()
         writer.writerows(pdf_list)
         logging.info(f"CSV file '{filename}' saved successfully!")
