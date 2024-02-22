@@ -1,3 +1,4 @@
+import logging
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import *
 from tkinter import *
@@ -16,6 +17,7 @@ class PDFCrawler(tkb.Window):
         self.create_frame_filters(root)
         self.create_progressbar(root)
         self.create_table_result(root)
+        self.create_action_menu(root)
 
     def create_table_result(self, root: tkb.Window):
         self.tbl_results = tkb.Treeview(
@@ -23,7 +25,7 @@ class PDFCrawler(tkb.Window):
             columns=[0, 1, 2, 3],
             show=HEADINGS
         )
-        self.tbl_results.pack(fill=BOTH, expand=YES, padx=10, pady=10)
+        self.tbl_results.pack(fill=BOTH, expand=YES, padx=5, pady=5)
         self.tbl_results.heading(0, text="Size")
         self.tbl_results.heading(1, text="Pages")
         self.tbl_results.heading(2, text="File")
@@ -59,45 +61,100 @@ class PDFCrawler(tkb.Window):
             mode=INDETERMINATE,
             bootstyle=(STRIPED, SUCCESS)
         )
-        self.progressbar.pack(fill=X, expand=FALSE, padx=10, pady=10)
+        self.progressbar.pack(fill=X, padx=5, pady=5)
         self.lbl_progress = tkb.Label(root, text="Waiting to start...")
-        self.lbl_progress.pack(pady=10, padx=10)
+        self.lbl_progress.pack(pady=5, padx=5)
 
     def create_frame_folder(self, root: tkb.Window):
         self.frame_folder: tkb.Frame = tkb.Frame(root)
         self.lbl_folder = tkb.Label(
-            self.frame_folder, text="Folder:", width=10)
-        self.lbl_folder.pack(side=LEFT, pady=10, padx=10)
-        self.etr_folder = tkb.Entry(self.frame_folder, textvariable="folder")
-        self.etr_folder.pack(side=LEFT, pady=10, padx=10)
+            self.frame_folder, 
+            text="Folder:", 
+            width=10
+        )
+        self.lbl_folder.pack(side=LEFT, pady=5, padx=5)
+        self.etr_folder = tkb.Entry(
+            self.frame_folder, 
+            textvariable="folder"
+        )
+        self.etr_folder.pack(side=LEFT, pady=5, padx=5, fill=X)
+        self.btn_pick_folder = tkb.Button(
+            self.frame_folder, 
+            text="Choose folder", 
+            bootstyle="primary",
+            command=self.on_btn_pick_folder_click
+        )
+        self.btn_pick_folder.pack(side=LEFT, pady=5, padx=5)
         self.btn_find = tkb.Button(
-            self.frame_folder, text="Choose folder", bootstyle="primary")
-        self.btn_find.pack(side=LEFT, pady=10, padx=10)
-        self.btn_find = tkb.Button(
-            self.frame_folder, text="Start search", bootstyle="success")
-        self.btn_find.pack(side=LEFT, pady=10, padx=10)
+            self.frame_folder, 
+            text="Start search", 
+            bootstyle="success",
+            command=self.on_btn_find_click
+        )
+        self.btn_find.pack(side=LEFT, pady=5, padx=5)
         self.frame_folder.pack()
 
     def create_frame_filters(self, root: tkb.Window):
         self.frame_filters: tkb.Frame = tkb.Frame(root)
         self.lbl_pages = tkb.Label(
-            self.frame_filters, text="Num. pages:", width=10)
-        self.lbl_pages.pack(side=LEFT, pady=10, padx=10)
+            self.frame_filters, 
+            text="Num. pages:", 
+            width=10
+        )
+        self.lbl_pages.pack(side=LEFT, pady=5, padx=5)
         self.cmb_page_size = tkb.Combobox(
-            self.frame_filters, values=self.page_size_options, width=10)
+            self.frame_filters, 
+            values=self.page_size_options, 
+            width=10
+        )
         self.cmb_page_size.current(0)
         self.cmb_page_size.state(["readonly"])
-        self.cmb_page_size.pack(side=LEFT, pady=10, padx=10)
+        self.cmb_page_size.pack(side=LEFT, pady=5, padx=5)
         self.lbl_pdf_size = tkb.Label(
-            self.frame_filters, text="PDF size:", width=10)
-        self.lbl_pdf_size.pack(side=LEFT, pady=10, padx=10)
+            self.frame_filters, 
+            text="PDF size:", 
+            width=10
+        )
+        self.lbl_pdf_size.pack(side=LEFT, pady=5, padx=5)
         self.cmb_pdf_size = tkb.Combobox(
-            self.frame_filters, values=self.pdf_size_options, width=10)
+            self.frame_filters, 
+            values=self.pdf_size_options, 
+            width=10
+        )
         self.cmb_pdf_size.current(0)
         self.cmb_pdf_size.state(["readonly"])
-        self.cmb_pdf_size.pack(side=LEFT, pady=10, padx=10)
+        self.cmb_pdf_size.pack(side=LEFT, pady=5, padx=5)
         self.frame_filters.pack()
 
+    def create_action_menu(self, root: tkb.Window):
+        self.frame_actions: tkb.Frame = tkb.Frame(root)
+        self.btn_export_csv = tkb.Button(
+            self.frame_actions, 
+            text="Export to CSV", 
+            bootstyle="primary",
+            command=self.on_btn_export_csv_click
+        )
+        self.btn_export_csv.pack(side=LEFT, pady=5, padx=5)
+        self.btn_copy = tkb.Button(
+            self.frame_actions, 
+            text="Copy files to...", 
+            bootstyle="success",
+            command=self.on_btn_copy_click
+        )
+        self.btn_copy.pack(side=LEFT, pady=5, padx=5)
+        self.frame_actions.pack()
+
+    def on_btn_export_csv_click(self):
+        print("Exporting to CSV...")
+    
+    def on_btn_copy_click(self):
+        print("Copying files...")
+        
+    def on_btn_pick_folder_click(self):
+        print("Picking folder...")
+        
+    def on_btn_find_click(self):
+        print("Finding PDFs...")
 
 if __name__ == "__main__":
     root = tkb.Window("PDFCrawler")
