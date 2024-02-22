@@ -55,9 +55,3 @@ def save_to_csv(pdf_list: list, filename: str) -> None:
         logging.info(f"CSV file '{filename}' saved successfully!")
 
 
-if __name__ == "__main__":
-    logging.info("Finding pdfs...")
-    path = "C:\\Users\\lauri\\Google Drive\\Pessoal\\# RPG"
-    files = find_all_pdf_files(path)
-    pdf_files = validate_pdfs(files)
-    save_to_csv(pdf_files, os.path.join(os.getcwd(), "pdfs.txt"))
