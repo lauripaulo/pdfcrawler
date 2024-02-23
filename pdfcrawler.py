@@ -2,6 +2,7 @@ import logging
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import *
 from tkinter import *
+from engine import Finder, CallBack
 
 
 class PDFCrawler(tkb.Window):
@@ -12,6 +13,8 @@ class PDFCrawler(tkb.Window):
 
         self.page_size_options = ["All", ">5", ">10", '>20']
         self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
+        self.finder = Finder()
+        self.folder : str = self.finder.get_current_folder()
 
         self.create_frame_folder(root)
         self.create_frame_filters(root)
@@ -75,9 +78,10 @@ class PDFCrawler(tkb.Window):
         self.lbl_folder.pack(side=LEFT, pady=5, padx=5)
         self.etr_folder = tkb.Entry(
             self.frame_folder, 
-            textvariable="folder"
+            textvariable=self.folder
         )
-        self.etr_folder.pack(side=LEFT, pady=5, padx=5, fill=X)
+        self.etr_folder.insert(0, self.finder.get_current_folder())
+        self.etr_folder.pack(side=LEFT, pady=5, padx=5, fill=X, expand=YES)
         self.btn_pick_folder = tkb.Button(
             self.frame_folder, 
             text="Choose folder", 
@@ -85,14 +89,7 @@ class PDFCrawler(tkb.Window):
             command=self.on_btn_pick_folder_click
         )
         self.btn_pick_folder.pack(side=LEFT, pady=5, padx=5)
-        self.btn_find = tkb.Button(
-            self.frame_folder, 
-            text="Start search", 
-            bootstyle="success",
-            command=self.on_btn_find_click
-        )
-        self.btn_find.pack(side=LEFT, pady=5, padx=5)
-        self.frame_folder.pack()
+        self.frame_folder.pack(anchor=W, fill=X, padx=5, pady=5)
 
     def create_frame_filters(self, root: tkb.Window):
         self.frame_filters: tkb.Frame = tkb.Frame(root)
@@ -124,7 +121,14 @@ class PDFCrawler(tkb.Window):
         self.cmb_pdf_size.current(0)
         self.cmb_pdf_size.state(["readonly"])
         self.cmb_pdf_size.pack(side=LEFT, pady=5, padx=5)
-        self.frame_filters.pack()
+        self.btn_find = tkb.Button(
+            self.frame_filters, 
+            text="Start search", 
+            bootstyle="success",
+            command=self.on_btn_find_click
+        )
+        self.btn_find.pack(side=LEFT, pady=5, padx=5)
+        self.frame_filters.pack(anchor=W, fill=X, padx=5, pady=5)
 
     def create_action_menu(self, root: tkb.Window):
         self.frame_actions: tkb.Frame = tkb.Frame(root)
@@ -142,7 +146,7 @@ class PDFCrawler(tkb.Window):
             command=self.on_btn_copy_click
         )
         self.btn_copy.pack(side=LEFT, pady=5, padx=5)
-        self.frame_actions.pack()
+        self.frame_actions.pack(anchor=E, fill=X, padx=5, pady=5)
 
     def on_btn_export_csv_click(self):
         print("Exporting to CSV...")
