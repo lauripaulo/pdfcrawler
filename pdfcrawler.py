@@ -1,4 +1,5 @@
 import logging
+import threading
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import *
 from tkinter import *
@@ -158,11 +159,13 @@ class PDFCrawler(tkb.Window):
         print("Picking folder...")
         
     def on_btn_find_click(self):
+        threading.Thread(target=self._run_find).start()
+        
+    def _run_find(self):
         print(f"Finding PDFs in {self.folder}...")
         observer : CallBack = FileFinderObserver(self.progressbar, self.lbl_progress)
-        self.finder.find_all_pdf_files("self.folder", observer)
+        self.finder.find_all_pdf_files("/home/lauri", observer)
         print("Done!")
-        
         
 class FileFinderObserver(CallBack):
     
