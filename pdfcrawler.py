@@ -2,7 +2,7 @@ import logging
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import *
 from tkinter import *
-from engine import Finder, CallBack
+from engine import Finder, CallBack, CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED
 
 
 class PDFCrawler(tkb.Window):
@@ -158,7 +158,21 @@ class PDFCrawler(tkb.Window):
         print("Picking folder...")
         
     def on_btn_find_click(self):
-        print("Finding PDFs...")
+        print(f"Finding PDFs in {self.folder}...")
+        observer : CallBack = FileFinderObserver(self.progressbar, self.lbl_progress)
+        self.finder.find_all_pdf_files("self.folder", observer)
+        print("Done!")
+        
+        
+class FileFinderObserver(CallBack):
+    
+    def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
+        self.progress_bar : tkb.Progressbar = progress_bar
+        self.label : tkb.Label = label
+        
+    def update(self, type: int, message: str) -> None:
+        if type == CALLBACK_FILE_FOUND:
+          self.label.config(text=message)
 
 if __name__ == "__main__":
     root = tkb.Window("PDFCrawler")
