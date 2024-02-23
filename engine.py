@@ -63,3 +63,7 @@ class Finder:
             writer.writeheader()
             writer.writerows(self.validated_pdf_files)
             logging.info(f"CSV file '{filename}' saved successfully!")
+            
+    @staticmethod
+    def get_current_folder() -> str:
+        return os.path.abspath(os.curdir)
