@@ -63,7 +63,7 @@ class PDFCrawler(tkb.Window):
         self.progressbar = tkb.Progressbar(
             master=root,
             mode=INDETERMINATE,
-            bootstyle=(STRIPED, SUCCESS)
+            bootstyle=(SUCCESS)
         )
         self.progressbar.pack(fill=X, padx=5, pady=5)
         self.lbl_progress = tkb.Label(root, text="Waiting to start...")
@@ -172,10 +172,17 @@ class PDFCrawler(tkb.Window):
         observer: CallBack = FileFinderObserver(
             self.progressbar, self.lbl_progress)
         self.finder.find_all_pdf_files(self.etr_folder.get(), observer)
-        observer.update(CALLBACK_FILE_FOUND, "Done finding PDFs!")
+        observer.update(CALLBACK_FILE_FOUND, f"Done finding PDFs! Total: {len(self.finder.pdf_files)} files.")
+        # validating PDFs
+        if len(self.finder.pdf_files) > 0:
+            observer.counter = 0
+            self.progressbar.config(mode="determinate", maximum=len(self.finder.pdf_files))
+            self.progressbar.value = 0
+            self.finder.validate_pdfs(observer)
+            observer.update(CALLBACK_FILE_VALIDATED, f"Done validating PDFs! Total files: {len(self.finder.validated_pdf_files)} files.")
+            self.btn_copy.config(state=NORMAL)
+            self.btn_export_csv.config(state=NORMAL)
         self.btn_find.config(state=NORMAL)
-        self.btn_copy.config(state=NORMAL)
-        self.btn_export_csv.config(state=NORMAL)
 
 
 class FileFinderObserver(CallBack):
@@ -183,10 +190,12 @@ class FileFinderObserver(CallBack):
     def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
         self.progress_bar: tkb.Progressbar = progress_bar
         self.label: tkb.Label = label
+        self.counter : int = 0
 
     def update(self, type: int, message: str) -> None:
-        if type == CALLBACK_FILE_FOUND:
-            self.label.config(text=message)
+        self.counter += 1
+        self.label.config(text=message)
+        self.progress_bar.step()
 
 
 if __name__ == "__main__":

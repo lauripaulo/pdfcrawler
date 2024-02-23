@@ -23,6 +23,7 @@ class Finder:
         # Percorre a árvore de diretórios
         for root, dirs, files in os.walk(initial_path):
             entry: dict
+            callback.update(CALLBACK_FILE_FOUND, f"Found folder '{root}'...")
             for file in files:
                 # Verifica se o arquivo é um PDF
                 if file.endswith('.pdf'):
@@ -33,7 +34,6 @@ class Finder:
                         "info": None
                     }
                     self.pdf_files.append(entry)
-                    callback.update(CALLBACK_FILE_FOUND, f"Found '{entry}'...")
         return self.pdf_files
 
     def validate_pdfs(self, callback: CallBack) -> list:
@@ -41,10 +41,10 @@ class Finder:
             try:
                 self.read_pdf_info(entry)
                 self.validated_pdf_files.append(entry)
-                callback.update(CALLBACK_FILE_VALIDATED,
-                                f"Validated '{entry['fullname']}'...")
             except Exception as e:
                 logging.warning(f"Can't open {entry['fullname']}: {e}")
+            callback.update(CALLBACK_FILE_VALIDATED,
+                            f"Validated '{entry['fullname']}'...")
         return self.validated_pdf_files
 
     def read_pdf_info(self, pdf_file: dict) -> dict:
