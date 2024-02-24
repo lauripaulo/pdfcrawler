@@ -13,6 +13,17 @@ from engine import (CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack,
 
 
 class PDFCrawler(tkb.Window):
+    page_size_translate: dict = {
+        "All": 0,
+        ">10": 10,
+        ">20": 20
+    }
+    pdf_size_translate: dict = {
+        "All": 0, 
+        ">1MB": 1 * 1024 * 1024, 
+        ">5MB": 5 * 1024 * 1024, 
+        ">10MB": 10 * 1024 * 1024
+    }
 
     def __init__(self, root: tkb.Window):
         root.geometry("1024x800")
@@ -153,6 +164,10 @@ class PDFCrawler(tkb.Window):
         self.btn_copy.config(state=DISABLED)
         self.btn_export_csv.config(state=DISABLED)
         self.btn_pick_folder.config(state=DISABLED)
+        self.finder.file_size_filter = self.pdf_size_translate[
+            self.cmb_pdf_size.get()]
+        self.finder.page_size_filter = self.page_size_translate[
+            self.cmb_page_size.get()]
         threading.Thread(target=self._run_find).start()
 
     def _run_find(self):

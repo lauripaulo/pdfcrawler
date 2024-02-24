@@ -18,6 +18,8 @@ class CallBack:
 class Finder:
     pdf_files: list = []
     validated_pdf_files: list = []
+    file_size_filter: int = 0
+    page_size_filter: int = 0
 
     def find_all_pdf_files(self, initial_path: str, callback: CallBack) -> list:
         # Percorre a árvore de diretórios
@@ -40,7 +42,9 @@ class Finder:
         for entry in self.pdf_files:
             try:
                 self.read_pdf_info(entry)
-                self.validated_pdf_files.append(entry)
+                if entry["size"] > self.file_size_filter and \
+                        entry["pages"] > self.page_size_filter:
+                    self.validated_pdf_files.append(entry)
             except Exception as e:
                 logging.warning(f"Can't open {entry['fullname']}: {e}")
             callback.update(CALLBACK_FILE_VALIDATED,
@@ -63,11 +67,11 @@ class Finder:
             writer.writeheader()
             writer.writerows(self.validated_pdf_files)
             logging.info(f"CSV file '{filename}' saved successfully!")
-            
+
     @staticmethod
     def get_current_folder() -> str:
         return os.path.abspath(os.curdir)
-    
+
     @staticmethod
     def convert_size(size):
         """Convert bytes to mb or kb depending on scale"""
