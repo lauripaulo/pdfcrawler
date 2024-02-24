@@ -33,9 +33,9 @@ class PDFCrawler(tkb.Window):
             show=HEADINGS
         )
         self.tbl_results.pack(fill=BOTH, expand=YES, padx=5, pady=5)
-        self.tbl_results.heading(0, text="Size")
-        self.tbl_results.heading(1, text="Pages")
-        self.tbl_results.heading(2, text="File")
+        self.tbl_results.heading(0, text="Size", anchor=W)
+        self.tbl_results.heading(1, text="Pages", anchor=W)
+        self.tbl_results.heading(2, text="File", anchor=W)
         self.tbl_results.column(
             column=0,
             width=100,
