@@ -2,9 +2,11 @@ import logging
 import threading
 from pathlib import Path
 from tkinter import *
+from turtle import color
 
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import *
+from ttkbootstrap.tableview import Tableview
 
 from engine import (CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack,
                     Finder)
@@ -13,8 +15,8 @@ from engine import (CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack,
 class PDFCrawler(tkb.Window):
 
     def __init__(self, root: tkb.Window):
-        root.geometry("1024x600")
-        root.maxsize(1024, 600)
+        root.geometry("1024x800")
+        root.maxsize(1024, 800)
 
         self.page_size_options = ["All", ">5", ">10", '>20']
         self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
@@ -23,37 +25,28 @@ class PDFCrawler(tkb.Window):
         self.create_frame_folder(root)
         self.create_frame_filters(root)
         self.create_progressbar(root)
-        self.create_table_result(root)
+        self.create_tableview(root)
         self.create_action_menu(root)
+        
 
-    def create_table_result(self, root: tkb.Window):
-        self.tbl_results = tkb.Treeview(
+    def create_tableview(self, root: tkb.Window):
+        colors = root.style.colors
+        headings: list = [
+            {"text": "Size", "width": 100, "anchor": "w"},
+            {"text": "Pages", "width": 100, "anchor": "w"},
+            {"text": "File", "width": 824, "anchor": "w"},
+            {"text": "Full path", "width": 800, "anchor": "w"}
+        ]
+        self.tableview: Tableview = Tableview(
             master=root,
-            columns=[0, 1, 2, 3],
-            show=HEADINGS
+            coldata=headings,
+            paginated=True,
+            pagesize=15,
+            searchable=True,
+            bootstyle=PRIMARY,
+            stripecolor=(colors.light, colors.dark)
         )
-        self.tbl_results.pack(fill=BOTH, expand=YES, padx=5, pady=5)
-        self.tbl_results.heading(0, text="Size", anchor=W)
-        self.tbl_results.heading(1, text="Pages", anchor=W)
-        self.tbl_results.heading(2, text="File", anchor=W)
-        self.tbl_results.column(
-            column=0,
-            width=100,
-            stretch=NO,
-            anchor=W
-        )
-        self.tbl_results.column(
-            column=1,
-            width=100,
-            stretch=NO,
-            anchor=W
-        )
-        self.tbl_results.column(
-            column=2,
-            width=824,
-            stretch=NO,
-            anchor=W
-        )
+        self.tableview.pack(fill=BOTH, expand=YES, padx=5, pady=5)
 
     def create_progressbar(self, root: tkb.Window):
         self.progressbar = tkb.Progressbar(
@@ -180,13 +173,16 @@ class PDFCrawler(tkb.Window):
             for item in self.finder.validated_pdf_files:
                 filename = f"{Path(item['fullname']).stem + '.pdf'}"
                 formatted_size = self.finder.convert_size(item["size"])
-                self.tbl_results.insert(
-                    '', 'end',
-                    values=(formatted_size,
-                            item["pages"],
-                            filename
-                            )
+                self.tableview.insert_row(
+                    'end',
+                    (
+                        formatted_size,
+                        item["pages"],
+                        filename,
+                        item['fullname']
+                    )
                 )
+            self.tableview.load_table_data()
             self.btn_copy.config(state=NORMAL)
             self.btn_export_csv.config(state=NORMAL)
         self.btn_find.config(state=NORMAL)
