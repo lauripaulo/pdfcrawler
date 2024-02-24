@@ -1,11 +1,13 @@
 import logging
 import threading
-from turtle import st
+from pathlib import Path
+from tkinter import *
+
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import *
-from tkinter import *
-from engine import Finder, CallBack, CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED
-from pathlib import Path
+
+from engine import (CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack,
+                    Finder)
 
 
 class PDFCrawler(tkb.Window):
@@ -168,21 +170,22 @@ class PDFCrawler(tkb.Window):
         if len(self.finder.pdf_files) > 0:
             observer.counter = 0
             self.progressbar.config(
-                mode="determinate", 
+                mode="determinate",
                 maximum=len(self.finder.pdf_files) + 1
             )
             self.progressbar.value = 0
             self.finder.validate_pdfs(observer)
-            self.finder.validated_pdf_files.sort(key=lambda x: x["size"], reverse=True)
+            self.finder.validated_pdf_files.sort(
+                key=lambda x: x["size"], reverse=True)
             for item in self.finder.validated_pdf_files:
                 filename = f"{Path(item['fullname']).stem + '.pdf'}"
                 formatted_size = self.finder.convert_size(item["size"])
                 self.tbl_results.insert(
                     '', 'end',
-                    values=(formatted_size, 
+                    values=(formatted_size,
                             item["pages"],
                             filename
-                    )
+                            )
                 )
             self.btn_copy.config(state=NORMAL)
             self.btn_export_csv.config(state=NORMAL)
