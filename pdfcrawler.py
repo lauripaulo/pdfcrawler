@@ -5,6 +5,7 @@ import ttkbootstrap as tkb
 from ttkbootstrap.constants import *
 from tkinter import *
 from engine import Finder, CallBack, CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED
+from pathlib import Path
 
 
 class PDFCrawler(tkb.Window):
@@ -150,7 +151,6 @@ class PDFCrawler(tkb.Window):
         self.btn_copy.pack(side=LEFT, pady=5, padx=5)
         self.frame_actions.pack(anchor=E, fill=X, padx=5, pady=5)
 
-
     def on_btn_export_csv_click(self):
         print("Exporting to CSV...")
 
@@ -172,14 +172,26 @@ class PDFCrawler(tkb.Window):
         observer: CallBack = FileFinderObserver(
             self.progressbar, self.lbl_progress)
         self.finder.find_all_pdf_files(self.etr_folder.get(), observer)
-        observer.update(CALLBACK_FILE_FOUND, f"Done finding PDFs! Total: {len(self.finder.pdf_files)} files.")
-        # validating PDFs
         if len(self.finder.pdf_files) > 0:
             observer.counter = 0
-            self.progressbar.config(mode="determinate", maximum=len(self.finder.pdf_files))
+            self.progressbar.config(
+                mode="determinate", 
+                maximum=len(self.finder.pdf_files) + 1
+            )
             self.progressbar.value = 0
             self.finder.validate_pdfs(observer)
-            observer.update(CALLBACK_FILE_VALIDATED, f"Done validating PDFs! Total files: {len(self.finder.validated_pdf_files)} files.")
+            self.finder.validated_pdf_files.sort(key=lambda x: x["size"], reverse=True)
+            for item in self.finder.validated_pdf_files:
+                filename = f"{Path(item['fullname']).stem + '.pdf'}"
+                formatted_size = self.finder.convert_size(item["size"])
+                self.tbl_results.insert(
+                    '', 'end',
+                    values=(formatted_size, 
+                            item["pages"],
+                            filename, 
+                            item["info"]
+                    )
+                )
             self.btn_copy.config(state=NORMAL)
             self.btn_export_csv.config(state=NORMAL)
         self.btn_find.config(state=NORMAL)
@@ -190,7 +202,7 @@ class FileFinderObserver(CallBack):
     def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
         self.progress_bar: tkb.Progressbar = progress_bar
         self.label: tkb.Label = label
-        self.counter : int = 0
+        self.counter: int = 0
 
     def update(self, type: int, message: str) -> None:
         self.counter += 1
