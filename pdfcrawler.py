@@ -34,7 +34,6 @@ class PDFCrawler(tkb.Window):
         self.tbl_results.heading(0, text="Size")
         self.tbl_results.heading(1, text="Pages")
         self.tbl_results.heading(2, text="File")
-        self.tbl_results.heading(3, text="Info")
         self.tbl_results.column(
             column=0,
             width=100,
@@ -49,13 +48,7 @@ class PDFCrawler(tkb.Window):
         )
         self.tbl_results.column(
             column=2,
-            width=400,
-            stretch=NO,
-            anchor=W
-        )
-        self.tbl_results.column(
-            column=3,
-            width=400,
+            width=824,
             stretch=NO,
             anchor=W
         )
@@ -188,8 +181,7 @@ class PDFCrawler(tkb.Window):
                     '', 'end',
                     values=(formatted_size, 
                             item["pages"],
-                            filename, 
-                            item["info"]
+                            filename
                     )
                 )
             self.btn_copy.config(state=NORMAL)
