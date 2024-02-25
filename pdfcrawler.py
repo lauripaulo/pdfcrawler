@@ -1,18 +1,18 @@
 import logging
 import threading
 from pathlib import Path
-from tkinter import *
+from tkinter import Scrollbar, X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT
 from turtle import color
 
 import ttkbootstrap as tkb
-from ttkbootstrap.constants import *
+from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, VERTICAL, HORIZONTAL
 from ttkbootstrap.tableview import Tableview
 
 from engine import CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack, Finder
 
 
 class PDFCrawler(tkb.Window):
-    page_size_translate: dict = {"All": 0, ">10": 10, ">20": 20}
+    page_size_translate: dict = {"All": 0, ">5": 5, ">10": 10, ">20": 20}
     pdf_size_translate: dict = {
         "All": 0,
         ">1MB": 1 * 1024 * 1024,
@@ -21,8 +21,8 @@ class PDFCrawler(tkb.Window):
     }
 
     def __init__(self, root: tkb.Window):
-        root.geometry("1024x800")
-        root.maxsize(1024, 800)
+        root.geometry("1024x500")
+        root.maxsize(1024, 500)
 
         self.page_size_options = ["All", ">5", ">10", ">20"]
         self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
@@ -39,19 +39,18 @@ class PDFCrawler(tkb.Window):
         headings: list = [
             {"text": "Size", "width": 100, "anchor": "w"},
             {"text": "Pages", "width": 100, "anchor": "w"},
-            {"text": "File", "width": 824, "anchor": "w"},
+            {"text": "File", "width": 450, "anchor": "w"},
             {"text": "Full path", "width": 800, "anchor": "w"},
         ]
         self.tableview: Tableview = Tableview(
             master=root,
             coldata=headings,
-            paginated=True,
-            pagesize=15,
             searchable=True,
             bootstyle=PRIMARY,
+            paginated=True,
             stripecolor=(colors.light, colors.dark),
         )
-        self.tableview.pack(fill=BOTH, expand=YES, padx=5, pady=5)
+        self.tableview.pack(fill=X, padx=5, pady=5)
 
     def create_progressbar(self, root: tkb.Window):
         self.progressbar = tkb.Progressbar(
