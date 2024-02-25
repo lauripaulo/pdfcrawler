@@ -28,12 +28,12 @@ class Finder:
             callback.update(CALLBACK_FILE_FOUND, f"Found folder '{root}'...")
             for file in files:
                 # Verifica se o arquivo é um PDF
-                if file.endswith('.pdf'):
+                if file.endswith(".pdf"):
                     entry = {
                         "fullname": os.path.join(root, file),
                         "size": os.path.getsize(os.path.join(root, file)),
                         "pages": 0,
-                        "info": None
+                        "info": None,
                     }
                     self.pdf_files.append(entry)
         return self.pdf_files
@@ -42,18 +42,21 @@ class Finder:
         for entry in self.pdf_files:
             try:
                 self.read_pdf_info(entry)
-                if entry["size"] > self.file_size_filter and \
-                        entry["pages"] > self.page_size_filter:
+                if (
+                    entry["size"] > self.file_size_filter
+                    and entry["pages"] > self.page_size_filter
+                ):
                     self.validated_pdf_files.append(entry)
             except Exception as e:
                 logging.warning(f"Can't open {entry['fullname']}: {e}")
-            callback.update(CALLBACK_FILE_VALIDATED,
-                            f"Validated '{entry['fullname']}'...")
+            callback.update(
+                CALLBACK_FILE_VALIDATED, f"Validated '{entry['fullname']}'..."
+            )
         return self.validated_pdf_files
 
     def read_pdf_info(self, pdf_file: dict) -> dict:
         complete_entry: dict = pdf_file
-        with open(pdf_file["fullname"], 'rb') as f:
+        with open(pdf_file["fullname"], "rb") as f:
             pdf = PdfReader(f)
             pdf_file["pages"] = len(pdf.pages)
             pdf_file["info"] = pdf.metadata
@@ -61,9 +64,10 @@ class Finder:
         return complete_entry
 
     def save_to_csv(self, filename: str) -> None:
-        with open(filename, "w", encoding='utf-8') as f:
+        with open(filename, "w", encoding="utf-8") as f:
             writer = csv.DictWriter(
-                f, fieldnames=["fullname", "size", "pages", "info"], dialect="excel")
+                f, fieldnames=["fullname", "size", "pages", "info"], dialect="excel"
+            )
             writer.writeheader()
             writer.writerows(self.validated_pdf_files)
             logging.info(f"CSV file '{filename}' saved successfully!")
@@ -78,6 +82,6 @@ class Finder:
         kb = size // 1000
         mb = round(kb / 1000, 1)
         if kb > 1000:
-            return f'{mb:,.1f} MB'
+            return f"{mb:,.1f} MB"
         else:
-            return f'{kb:,d} KB'
+            return f"{kb:,d} KB"
