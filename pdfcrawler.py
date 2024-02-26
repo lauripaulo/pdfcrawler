@@ -2,12 +2,12 @@ import os
 import logging
 import threading
 from pathlib import Path
-from tkinter import Scrollbar, X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT
+from tkinter import X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT
 from turtle import color
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as tkb
-from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, VERTICAL, HORIZONTAL
+from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, NORMAL
 from ttkbootstrap.tableview import Tableview
 
 from engine import CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack, Finder
@@ -166,11 +166,11 @@ class PDFCrawler(tkb.Window):
         if len(self.finder.pdf_files) > 0:
             observer.counter = 0
             self.progressbar.config(
-                mode="determinate", maximum=len(self.finder.pdf_files) + 1
+                mode="determinate", maximum=len(self.finder.pdf_files), value=0
             )
-            self.progressbar.value = 0
             self.finder.validate_pdfs(observer)
             self.finder.validated_pdf_files.sort(key=lambda x: x["size"], reverse=True)
+            print(f" >> Total: {len(self.finder.pdf_files)} / step: {observer.counter}")
             for item in self.finder.validated_pdf_files:
                 filename = f"{Path(item['fullname']).stem + '.pdf'}"
                 formatted_size = self.finder.convert_size(item["size"])
@@ -194,6 +194,7 @@ class FileFinderObserver(CallBack):
         self.counter += 1
         self.label.config(text=message)
         self.progress_bar.step()
+        print(f" >> {self.counter} - {message}")
 
 
 if __name__ == "__main__":
