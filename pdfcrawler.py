@@ -23,8 +23,8 @@ class PDFCrawler(tkb.Window):
     }
 
     def __init__(self, root: tkb.Window):
-        root.geometry("1024x500")
-        root.maxsize(1024, 500)
+        root.geometry("1024x550")
+        root.maxsize(1024, 550)
 
         self.page_size_options = ["All", ">5", ">10", ">20"]
         self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
@@ -127,6 +127,7 @@ class PDFCrawler(tkb.Window):
 
     def on_btn_export_csv_click(self):
         print("Exporting to CSV...")
+        self.tableview.export_all_records()
 
     def on_btn_copy_click(self):
         print("Copying files...")
