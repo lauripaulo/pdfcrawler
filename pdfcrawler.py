@@ -3,6 +3,7 @@ import threading
 from pathlib import Path
 from tkinter import Scrollbar, X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT
 from turtle import color
+from tkinter import filedialog
 
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, VERTICAL, HORIZONTAL
@@ -131,6 +132,12 @@ class PDFCrawler(tkb.Window):
 
     def on_btn_pick_folder_click(self):
         print("Picking folder...")
+        folder_selected = filedialog.askdirectory()
+        self.etr_folder.delete(0, END)
+        self.etr_folder.insert(0, folder_selected)
+        self.finder.current_folder = folder_selected
+        print(f"Picked folder: {folder_selected}")
+        
 
     def on_btn_find_click(self):
         self.btn_find.config(state=DISABLED)
