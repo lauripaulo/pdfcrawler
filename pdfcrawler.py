@@ -1,9 +1,10 @@
+import os
 import logging
 import threading
 from pathlib import Path
 from tkinter import Scrollbar, X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT
 from turtle import color
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, VERTICAL, HORIZONTAL
@@ -140,15 +141,23 @@ class PDFCrawler(tkb.Window):
         
 
     def on_btn_find_click(self):
-        self.btn_find.config(state=DISABLED)
-        self.btn_copy.config(state=DISABLED)
-        self.btn_export_csv.config(state=DISABLED)
-        self.btn_pick_folder.config(state=DISABLED)
-        self.finder.file_size_filter = self.pdf_size_translate[self.cmb_pdf_size.get()]
-        self.finder.page_size_filter = self.page_size_translate[
-            self.cmb_page_size.get()
-        ]
-        threading.Thread(target=self._run_find).start()
+        self.folder_selected = self.etr_folder.get()
+        if os.path.exists(self.folder_selected):
+            self.btn_find.config(state=DISABLED)
+            self.btn_copy.config(state=DISABLED)
+            self.btn_export_csv.config(state=DISABLED)
+            self.btn_pick_folder.config(state=DISABLED)
+            self.finder.file_size_filter = self.pdf_size_translate[self.cmb_pdf_size.get()]
+            self.finder.page_size_filter = self.page_size_translate[
+                self.cmb_page_size.get()
+            ]
+            threading.Thread(target=self._run_find).start()
+        else :
+            print(f"Folder {self.folder_selected} not found!")
+            messagebox.showerror(
+                "Folder not found", 
+                f"Folder {self.folder_selected} not found!"
+            )
 
     def _run_find(self):
         print(f"Finding PDFs in {self.etr_folder.get()}...")
