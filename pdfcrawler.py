@@ -23,8 +23,8 @@ class PDFCrawler(tkb.Window):
     }
 
     def __init__(self, root: tkb.Window):
-        root.geometry("1024x550")
-        root.maxsize(1024, 550)
+        root.geometry("1024x600")
+        root.maxsize(1024, 600)
 
         self.page_size_options = ["All", ">5", ">10", ">20"]
         self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
