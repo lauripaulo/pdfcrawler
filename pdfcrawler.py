@@ -1,3 +1,5 @@
+from ast import Call
+from gc import callbacks
 import os
 import logging
 import threading
@@ -23,8 +25,8 @@ class PDFCrawler(tkb.Window):
     }
 
     def __init__(self, root: tkb.Window):
-        root.geometry("1024x600")
-        root.maxsize(1024, 600)
+        root.geometry("1024x700")
+        root.maxsize(1024, 700)
 
         self.page_size_options = ["All", ">5", ">10", ">20"]
         self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
@@ -131,6 +133,24 @@ class PDFCrawler(tkb.Window):
 
     def on_btn_copy_click(self):
         print("Copying files...")
+        target_folder: str = filedialog.askdirectory()
+        overwrite: bool = messagebox.askyesno("Overwrite files", "Overwrite files?")
+        if target_folder:
+            self.progressbar.config(
+                mode="determinate",
+                maximum=len(self.finder.validated_pdf_files),
+                value=0,
+            )
+            self.btn_copy.config(state=DISABLED)
+            self.btn_export_csv.config(state=DISABLED)
+            self.btn_pick_folder.config(state=DISABLED)
+            threading.Thread(
+                target=self._run_copy,
+                args=(
+                    target_folder,
+                    overwrite,
+                ),
+            ).start()
 
     def on_btn_pick_folder_click(self):
         print("Picking folder...")
@@ -139,7 +159,6 @@ class PDFCrawler(tkb.Window):
         self.etr_folder.insert(0, folder_selected)
         self.finder.current_folder = folder_selected
         print(f"Picked folder: {folder_selected}")
-        
 
     def on_btn_find_click(self):
         self.folder_selected = self.etr_folder.get()
@@ -148,17 +167,25 @@ class PDFCrawler(tkb.Window):
             self.btn_copy.config(state=DISABLED)
             self.btn_export_csv.config(state=DISABLED)
             self.btn_pick_folder.config(state=DISABLED)
-            self.finder.file_size_filter = self.pdf_size_translate[self.cmb_pdf_size.get()]
+            self.finder.file_size_filter = self.pdf_size_translate[
+                self.cmb_pdf_size.get()
+            ]
             self.finder.page_size_filter = self.page_size_translate[
                 self.cmb_page_size.get()
             ]
             threading.Thread(target=self._run_find).start()
-        else :
+        else:
             print(f"Folder {self.folder_selected} not found!")
             messagebox.showerror(
-                "Folder not found", 
-                f"Folder {self.folder_selected} not found!"
+                "Folder not found", f"Folder {self.folder_selected} not found!"
             )
+
+    def _run_copy(self, target_folder: str, overwrite: bool) -> None:
+        self.finder.copy_files(
+            target_folder,
+            overwrite,
+            FileCopyObserver(self.progressbar, self.lbl_progress),
+        )
 
     def _run_find(self):
         print(f"Finding PDFs in {self.etr_folder.get()}...")
@@ -186,6 +213,19 @@ class PDFCrawler(tkb.Window):
 
 class FileFinderObserver(CallBack):
 
+    def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
+        self.progress_bar: tkb.Progressbar = progress_bar
+        self.label: tkb.Label = label
+        self.counter: int = 0
+
+    def update(self, type: int, message: str) -> None:
+        self.counter += 1
+        self.label.config(text=message)
+        self.progress_bar.step()
+        print(f" >> {self.counter} - {message}")
+
+
+class FileCopyObserver(CallBack):
     def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
         self.progress_bar: tkb.Progressbar = progress_bar
         self.label: tkb.Label = label

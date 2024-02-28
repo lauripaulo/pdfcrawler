@@ -1,7 +1,12 @@
+from operator import call
 import os
 from PyPDF2 import PdfReader
 import csv
 import logging
+import shutil
+import uuid
+
+from pathlib import Path
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -71,6 +76,29 @@ class Finder:
             writer.writeheader()
             writer.writerows(self.validated_pdf_files)
             logging.info(f"CSV file '{filename}' saved successfully!")
+
+    def copy_files(self, destination: str, overwrite: bool, callback: CallBack) -> None:
+        for entry in self.validated_pdf_files:
+            source_file: str = entry["fullname"]
+            filename = f"{Path(entry['fullname']).stem}.pdf"
+            done: bool = False
+            destination_file: str = os.path.join(destination, filename)
+            try:
+                if os.path.exists(destination_file):
+                    if overwrite:
+                        os.remove(destination_file)
+                    else:
+                        filename = f"{Path(entry['fullname']).stem}-{uuid.uuid4()}.pdf"
+                        destination_file = os.path.join(destination, filename)
+                shutil.copy2(source_file, destination_file)
+            except Exception as e:
+                logging.error(f"Error copying file: {e}")
+                done = True
+            callback.update(
+                CALLBACK_FILE_VALIDATED,
+                f"File '{entry['fullname']}' copied to '{destination}'",
+            )
+            logging.info(f"File '{entry['fullname']}' copied to '{destination}'")
 
     @staticmethod
     def get_current_folder() -> str:
