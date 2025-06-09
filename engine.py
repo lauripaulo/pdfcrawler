@@ -5,6 +5,7 @@ import csv
 import logging
 import shutil
 import uuid
+import hashlib
 
 from pathlib import Path
 
@@ -43,8 +44,9 @@ class Finder:
                     self.pdf_files.append(entry)
         return self.pdf_files
 
-    def validate_pdfs(self, callback: CallBack) -> list:
+    def validate_pdfs(self, callback: CallBack, detect_duplicates: bool) -> list:
         for entry in self.pdf_files:
+            entry["sha256"] = "N/A"
             try:
                 self.read_pdf_info(entry)
                 if (
@@ -52,10 +54,21 @@ class Finder:
                     and entry["pages"] > self.page_size_filter
                 ):
                     self.validated_pdf_files.append(entry)
+                    # --- Calculate SHA256 if duplicate detection is enabled ---
+                    if detect_duplicates:
+                        with open(entry["fullname"], "rb") as f:
+                            sha256 = hashlib.sha256()
+                            while True:
+                                chunk = f.read(8192)
+                                if not chunk:
+                                    break
+                                sha256.update(chunk)
+                            entry["sha256"] = sha256.hexdigest()
+                    # --- End SHA256 ---
             except Exception as e:
                 logging.warning(f"Can't open {entry['fullname']}: {e}")
             callback.update(
-                CALLBACK_FILE_VALIDATED, f"Validated '{entry['fullname']}'..."
+                CALLBACK_FILE_VALIDATED, f"Validated '{entry['fullname']}' - SHA256: {entry['sha256']}..."
             )
         return self.validated_pdf_files
 
@@ -64,7 +77,18 @@ class Finder:
         with open(pdf_file["fullname"], "rb") as f:
             pdf = PdfReader(f)
             pdf_file["pages"] = len(pdf.pages)
-            pdf_file["info"] = pdf.metadata
+            metadata = pdf.metadata
+            # Extract common metadata fields
+            pdf_file["info"] = {
+                "title": getattr(metadata, "title", None) or metadata.get("/Title", ""),
+                "author": getattr(metadata, "author", None) or metadata.get("/Author", ""),
+                "subject": getattr(metadata, "subject", None) or metadata.get("/Subject", ""),
+                "creator": getattr(metadata, "creator", None) or metadata.get("/Creator", ""),
+                "producer": getattr(metadata, "producer", None) or metadata.get("/Producer", ""),
+                "creation_date": getattr(metadata, "creation_date", None) or metadata.get("/CreationDate", ""),
+                "mod_date": getattr(metadata, "modification_date", None) or metadata.get("/ModDate", ""),
+                "raw": dict(metadata) if metadata else {},
+            }
             complete_entry = pdf_file
         return complete_entry
 
