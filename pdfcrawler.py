@@ -7,6 +7,7 @@ from pathlib import Path
 from tkinter import X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT
 from turtle import color
 from tkinter import filedialog, messagebox
+import hashlib
 
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, NORMAL
@@ -98,6 +99,16 @@ class PDFCrawler(tkb.Window):
         self.cmb_pdf_size.current(0)
         self.cmb_pdf_size.state(["readonly"])
         self.cmb_pdf_size.pack(side=LEFT, pady=5, padx=5)
+        # --- New code for Detect duplicates ---
+        self.lbl_detect_duplicates = tkb.Label(self.frame_filters, text="Detect duplicates:", width=16)
+        self.lbl_detect_duplicates.pack(side=LEFT, pady=5, padx=5)
+        self.cmb_detect_duplicates = tkb.Combobox(
+            self.frame_filters, values=["YES", "NO"], width=5
+        )
+        self.cmb_detect_duplicates.current(1)  # "NO" as default
+        self.cmb_detect_duplicates.state(["readonly"])
+        self.cmb_detect_duplicates.pack(side=LEFT, pady=5, padx=5)
+        # --- End new code ---
         self.btn_find = tkb.Button(
             self.frame_filters,
             text="Start search",
@@ -191,6 +202,9 @@ class PDFCrawler(tkb.Window):
         print(f"Finding PDFs in {self.etr_folder.get()}...")
         observer: CallBack = FileFinderObserver(self.progressbar, self.lbl_progress)
         self.finder.find_all_pdf_files(self.etr_folder.get(), observer)
+        # Clear previous table data before inserting new rows
+        self.tableview.delete_rows()
+        detect_duplicates = self.cmb_detect_duplicates.get() == "YES"
         if len(self.finder.pdf_files) > 0:
             observer.counter = 0
             self.progressbar.config(
@@ -199,13 +213,42 @@ class PDFCrawler(tkb.Window):
             self.finder.validate_pdfs(observer)
             self.finder.validated_pdf_files.sort(key=lambda x: x["size"], reverse=True)
             print(f" >> Total: {len(self.finder.pdf_files)} / step: {observer.counter}")
+            seen_hashes = set()
+            filtered_files = []
             for item in self.finder.validated_pdf_files:
+                filename = f"{Path(item['fullname']).stem + '.pdf'}"
+                formatted_size = self.finder.convert_size(item["size"])
+                # --- Calculate SHA256 if duplicate detection is enabled ---
+                if detect_duplicates:
+                    try:
+                        with open(item["fullname"], "rb") as f:
+                            sha256 = hashlib.sha256()
+                            while True:
+                                chunk = f.read(8192)
+                                if not chunk:
+                                    break
+                                sha256.update(chunk)
+                            item["sha256"] = sha256.hexdigest()
+                    except Exception as e:
+                        item["sha256"] = "ERROR"
+                        print(f"Error calculating SHA256 for {item['fullname']}: {e}")
+                # --- End SHA256 ---
+                # --- Remove duplicates if enabled ---
+                if detect_duplicates:
+                    file_hash = item.get("sha256")
+                    if file_hash in seen_hashes:
+                        logging.info(f"Duplicate PDF rejected: {item['fullname']}")
+                        continue
+                    if file_hash and file_hash != "ERROR":
+                        seen_hashes.add(file_hash)
+                filtered_files.append(item)
+            # Show only filtered files in the table
+            for item in filtered_files:
                 filename = f"{Path(item['fullname']).stem + '.pdf'}"
                 formatted_size = self.finder.convert_size(item["size"])
                 self.tableview.insert_row(
                     "end", (formatted_size, item["pages"], filename, item["fullname"])
                 )
-            self.tableview.load_table_data()
             self.btn_copy.config(state=NORMAL)
             self.btn_export_csv.config(state=NORMAL)
         self.btn_find.config(state=NORMAL)
