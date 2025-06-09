@@ -135,6 +135,16 @@ class PDFCrawler(tkb.Window):
             state=DISABLED,
         )
         self.btn_copy.pack(side=LEFT, pady=5, padx=5)
+        # --- New: Add checkbox for renaming files with title/author ---
+        self.rename_var = tkb.BooleanVar(value=False)
+        self.chk_rename = tkb.Checkbutton(
+            self.frame_actions,
+            text="Rename with Title & Author",
+            variable=self.rename_var,
+            bootstyle="info",
+        )
+        self.chk_rename.pack(side=LEFT, pady=5, padx=5)
+        # --- End new code ---
         self.frame_actions.pack(anchor=E, fill=X, padx=5, pady=5)
 
     def on_btn_export_csv_click(self):
@@ -145,6 +155,7 @@ class PDFCrawler(tkb.Window):
         print("Copying files...")
         target_folder: str = filedialog.askdirectory()
         overwrite: bool = messagebox.askyesno("Overwrite files", "Overwrite files?")
+        rename_with_metadata: bool = self.rename_var.get()
         if target_folder:
             self.progressbar.config(
                 mode="determinate",
@@ -159,6 +170,7 @@ class PDFCrawler(tkb.Window):
                 args=(
                     target_folder,
                     overwrite,
+                    rename_with_metadata,  # Pass the new option
                 ),
             ).start()
 
@@ -190,11 +202,12 @@ class PDFCrawler(tkb.Window):
                 "Folder not found", f"Folder {self.folder_selected} not found!"
             )
 
-    def _run_copy(self, target_folder: str, overwrite: bool) -> None:
+    def _run_copy(self, target_folder: str, overwrite: bool, rename_with_metadata: bool = False) -> None:
         self.finder.copy_files(
             target_folder,
             overwrite,
             FileCopyObserver(self.progressbar, self.lbl_progress),
+            rename_with_metadata,  # Pass to Finder
         )
 
     def _run_find(self):

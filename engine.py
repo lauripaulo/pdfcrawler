@@ -101,10 +101,20 @@ class Finder:
             writer.writerows(self.validated_pdf_files)
             logging.info(f"CSV file '{filename}' saved successfully!")
 
-    def copy_files(self, destination: str, overwrite: bool, callback: CallBack) -> None:
+    def copy_files(self, destination: str, overwrite: bool, callback: CallBack, rename_with_metadata: bool = False) -> None:
         for entry in self.validated_pdf_files:
             source_file: str = entry["fullname"]
-            filename = f"{Path(entry['fullname']).stem}.pdf"
+            # --- New: Rename with title/author if requested ---
+            if rename_with_metadata and entry.get("info"):
+                title = entry["info"].get("title", "").strip().replace("/", "_")
+                author = entry["info"].get("author", "").strip().replace("/", "_")
+                base = title if title else Path(entry['fullname']).stem
+                if author:
+                    base = f"{base} - {author}"
+                filename = f"{base}.pdf"
+            else:
+                filename = f"{Path(entry['fullname']).stem}.pdf"
+            # --- End new code ---
             done: bool = False
             destination_file: str = os.path.join(destination, filename)
             try:
@@ -112,7 +122,7 @@ class Finder:
                     if overwrite:
                         os.remove(destination_file)
                     else:
-                        filename = f"{Path(entry['fullname']).stem}-{uuid.uuid4()}.pdf"
+                        filename = f"{Path(entry['fullname']).stem}-{uuid.uuid1()}.pdf"
                         destination_file = os.path.join(destination, filename)
                 shutil.copy2(source_file, destination_file)
             except Exception as e:
@@ -120,9 +130,9 @@ class Finder:
                 done = True
             callback.update(
                 CALLBACK_FILE_VALIDATED,
-                f"File '{entry['fullname']}' copied to '{destination}'",
+                f"File '{entry['fullname']}' copied to '{destination_file}'",
             )
-            logging.info(f"File '{entry['fullname']}' copied to '{destination}'")
+            logging.info(f"File '{entry['fullname']}' copied to '{destination_file}'")
 
     @staticmethod
     def get_current_folder() -> str:
