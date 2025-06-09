@@ -5,7 +5,6 @@ import logging
 import threading
 from pathlib import Path
 from tkinter import X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT
-from turtle import color
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as tkb
@@ -238,14 +237,18 @@ class PDFCrawler(tkb.Window):
                         continue
                     if file_hash and file_hash != "ERROR":
                         seen_hashes.add(file_hash)
-                    filtered_files.append(item)
+                        filtered_files.append(item)
             # Show only filtered files in the table
+            # Temporarily hide the tableview to prevent UI updates during insertion
+            self.tableview.pack_forget()
             for item in filtered_files:
                 filename = f"{Path(item['fullname']).stem + '.pdf'}"
                 formatted_size = self.finder.convert_size(item["size"])
                 self.tableview.insert_row(
                     "end", (formatted_size, item["pages"], filename, item["fullname"])
                 )
+            # Re-display the tableview after all rows are inserted
+            self.tableview.pack(fill=X, padx=5, pady=5)
             self.btn_copy.config(state=NORMAL)
             self.btn_export_csv.config(state=NORMAL)
         self.btn_find.config(state=NORMAL)

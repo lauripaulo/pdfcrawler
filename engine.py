@@ -103,36 +103,50 @@ class Finder:
 
     def copy_files(self, destination: str, overwrite: bool, callback: CallBack, rename_with_metadata: bool = False) -> None:
         for entry in self.validated_pdf_files:
+            filename = ""
             source_file: str = entry["fullname"]
-            # --- New: Rename with title/author if requested ---
             if rename_with_metadata and entry.get("info"):
-                title = entry["info"].get("title", "").strip().replace("/", "_")
-                author = entry["info"].get("author", "").strip().replace("/", "_")
+                title = entry["info"].get("title", "").strip().replace("/", "_").replace(":", " ")
                 base = title if title else Path(entry['fullname']).stem
-                if author:
-                    base = f"{base} - {author}"
                 filename = f"{base}.pdf"
             else:
                 filename = f"{Path(entry['fullname']).stem}.pdf"
-            # --- End new code ---
-            done: bool = False
+
             destination_file: str = os.path.join(destination, filename)
+
+            # Validate source file
+            if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
+                logging.warning(f"Source file '{source_file}' is inaccessible or empty.")
+                continue
+
             try:
                 if os.path.exists(destination_file):
                     if overwrite:
-                        os.remove(destination_file)
+                        try:
+                            os.remove(destination_file)
+                        except Exception as e:
+                            logging.error(f"Error removing file '{destination_file}': {e}")
+                            continue
                     else:
-                        filename = f"{Path(entry['fullname']).stem}-{uuid.uuid1()}.pdf"
+                        filename = f"{Path(entry['fullname']).stem}-{uuid.uuid4()}.pdf"
                         destination_file = os.path.join(destination, filename)
-                shutil.copy2(source_file, destination_file)
+
+                # Perform the copy operation
+                shutil.copyfile(source_file, destination_file)
+                logging.info(f"File '{source_file}' copied to '{destination_file}'")
+                callback.update(
+                    CALLBACK_FILE_VALIDATED,
+                    f"File '{source_file}' copied to '{destination_file}'",
+                )
             except Exception as e:
-                logging.error(f"Error copying file: {e}")
-                done = True
-            callback.update(
-                CALLBACK_FILE_VALIDATED,
-                f"File '{entry['fullname']}' copied to '{destination_file}'",
-            )
-            logging.info(f"File '{entry['fullname']}' copied to '{destination_file}'")
+                logging.error(f"Error copying file '{source_file}' to '{destination_file}': {e}")
+                # Remove partially created file
+                if os.path.exists(destination_file):
+                    os.remove(destination_file)
+                callback.update(
+                    CALLBACK_FILE_VALIDATED,
+                    f"Failed to copy file '{source_file}' to '{destination_file}'",
+                )
 
     @staticmethod
     def get_current_folder() -> str:
