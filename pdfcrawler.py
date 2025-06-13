@@ -365,7 +365,7 @@ class PDFCrawler(tkb.Window):
                 if detect_duplicates:
                     duplicate_count = 0
                     for item in self.finder.validated_pdf_files:
-                        file_hash = item.get("sha256")
+                        file_hash = item.get("hash")
                         if file_hash in seen_hashes:
                             duplicate_count += 1
                             logging.info(f"{duplicate_count} - Duplicate PDF rejected: {item['fullname']}")

@@ -68,13 +68,16 @@ class Finder:
                                     hasher.update(chunk)
                                 entry["hash"] = hasher.hexdigest()
                         except Exception as e:
-                            logging.warning(f"Error calculating hash for {entry['fullname']}: {e}")
+                            logging.warning(
+                                f"Error calculating hash for {entry['fullname']}: {e}"
+                            )
                             entry["hash"] = "ERROR"
                     # --- End xxHash ---
             except Exception as e:
                 logging.warning(f"Can't open {entry['fullname']}: {e}")
             callback.update(
-                CALLBACK_FILE_VALIDATED, f"Validated '{entry['fullname']}' - Hash: {entry['hash']}..."
+                CALLBACK_FILE_VALIDATED,
+                f"Validated '{entry['fullname']}' - Hash: {entry['hash']}...",
             )
         return self.validated_pdf_files
 
@@ -87,12 +90,18 @@ class Finder:
             # Extract common metadata fields
             pdf_file["info"] = {
                 "title": getattr(metadata, "title", None) or metadata.get("/Title", ""),
-                "author": getattr(metadata, "author", None) or metadata.get("/Author", ""),
-                "subject": getattr(metadata, "subject", None) or metadata.get("/Subject", ""),
-                "creator": getattr(metadata, "creator", None) or metadata.get("/Creator", ""),
-                "producer": getattr(metadata, "producer", None) or metadata.get("/Producer", ""),
-                "creation_date": getattr(metadata, "creation_date", None) or metadata.get("/CreationDate", ""),
-                "mod_date": getattr(metadata, "modification_date", None) or metadata.get("/ModDate", ""),
+                "author": getattr(metadata, "author", None)
+                or metadata.get("/Author", ""),
+                "subject": getattr(metadata, "subject", None)
+                or metadata.get("/Subject", ""),
+                "creator": getattr(metadata, "creator", None)
+                or metadata.get("/Creator", ""),
+                "producer": getattr(metadata, "producer", None)
+                or metadata.get("/Producer", ""),
+                "creation_date": getattr(metadata, "creation_date", None)
+                or metadata.get("/CreationDate", ""),
+                "mod_date": getattr(metadata, "modification_date", None)
+                or metadata.get("/ModDate", ""),
                 "raw": dict(metadata) if metadata else {},
             }
             complete_entry = pdf_file
@@ -101,16 +110,24 @@ class Finder:
     def save_to_csv(self, filename: str) -> None:
         with open(filename, "w", encoding="utf-8") as f:
             writer = csv.DictWriter(
-                f, fieldnames=["fullname", "size", "pages", "info", "hash"], dialect="excel"
+                f,
+                fieldnames=["fullname", "size", "pages", "info", "hash"],
+                dialect="excel",
             )
             writer.writeheader()
             writer.writerows(self.validated_pdf_files)
             logging.info(f"CSV file '{filename}' saved successfully!")
 
-    def copy_files(self, destination: str, overwrite: bool, callback: CallBack, rename_with_metadata: bool = False) -> None:
+    def copy_files(
+        self,
+        destination: str,
+        overwrite: bool,
+        callback: CallBack,
+        rename_with_metadata: bool = False,
+    ) -> None:
         for entry in self.validated_pdf_files:
             source_file = entry["fullname"]
-            
+
             # Skip if source file doesn't exist or is empty
             if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
                 logging.warning(f"Skipping empty or inaccessible file: '{source_file}'")
@@ -119,10 +136,12 @@ class Finder:
             # Generate destination filename
             if rename_with_metadata and entry.get("info"):
                 title = entry["info"].get("title", "").strip()
-                base = self._sanitize_filename(title) if title else Path(source_file).stem
+                base = (
+                    self._sanitize_filename(title) if title else Path(source_file).stem
+                )
             else:
                 base = Path(source_file).stem
-            
+
             filename = f"{base}.pdf"
             destination_file = os.path.join(destination, filename)
 
@@ -135,41 +154,44 @@ class Finder:
                     try:
                         os.remove(destination_file)
                     except Exception as e:
-                        logging.error(f"Failed to remove existing file '{destination_file}': {e}")
+                        logging.error(
+                            f"Failed to remove existing file '{destination_file}': {e}"
+                        )
                         continue
 
             try:
                 shutil.copyfile(source_file, destination_file)
                 callback.update(
                     CALLBACK_FILE_VALIDATED,
-                    f"Copied '{source_file}' to '{destination_file}'"
+                    f"Copied '{source_file}' to '{destination_file}'",
                 )
             except Exception as e:
-                logging.error(f"Failed to copy '{source_file}' to '{destination_file}': {e}")
+                logging.error(
+                    f"Failed to copy '{source_file}' to '{destination_file}': {e}"
+                )
                 if os.path.exists(destination_file):
                     os.remove(destination_file)
                 callback.update(
-                    CALLBACK_FILE_VALIDATED,
-                    f"Failed to copy '{source_file}'"
+                    CALLBACK_FILE_VALIDATED, f"Failed to copy '{source_file}'"
                 )
 
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize a filename by removing invalid characters and ensuring it's not empty.
-        
+
         Args:
             filename: The filename to sanitize
-            
+
         Returns:
             A sanitized filename that is safe to use
         """
         # Remove invalid characters and ensure the filename is not empty
         invalid_chars = '<>:"/\\|?*'
         for char in invalid_chars:
-            filename = filename.replace(char, '_')
+            filename = filename.replace(char, "_")
         # Remove leading/trailing spaces and dots
-        filename = filename.strip('. ')
+        filename = filename.strip(". ")
         # If filename is empty after sanitization, use a default name
-        return filename if filename else 'untitled'
+        return filename if filename else "untitled"
 
     @staticmethod
     def get_current_folder() -> str:
