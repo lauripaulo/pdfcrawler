@@ -1,6 +1,6 @@
 import os
-from dataclasses import dataclass, field
-from typing import Optional, Callable, List, Dict, Tuple, Any
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Tuple, Any
 from PyPDF2 import PdfReader
 import csv
 import logging
@@ -144,9 +144,8 @@ class Finder:
             List of validated PdfEntry objects that pass filters
         """
         validated: List[PdfEntry] = []
-        total = len(pdf_files)
         
-        for i, entry in enumerate(pdf_files):
+        for entry in pdf_files:
             if callback and callback.is_cancelled():
                 logging.info("Validation cancelled by user")
                 break
@@ -180,6 +179,7 @@ class Finder:
             except Exception as e:
                 entry.is_valid = False
                 logging.warning(f"Can't open {entry.fullname}: {e}")
+                validated.append(entry)
                 if callback:
                     callback.update(CALLBACK_FILE_VALIDATED, f"Failed to validate '{entry.fullname}': {e}")
         

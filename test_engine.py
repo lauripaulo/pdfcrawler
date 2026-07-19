@@ -2,7 +2,6 @@ import os
 import csv
 import pytest
 from unittest.mock import Mock, patch
-from pathlib import Path
 from engine import Finder, PdfEntry, CallBack, CALLBACK_FILE_VALIDATED, CALLBACK_FILE_COPIED
 
 # Test fixtures
@@ -228,7 +227,7 @@ class TestFinderValidatePdfs:
     def test_validate_with_duplicate_detection(self, finder):
         """Test validation with duplicate detection enabled."""
         # Mock _read_pdf_info to avoid file I/O
-        with patch.object(finder, '_read_pdf_info', return_value=None) as mock_read:
+        with patch.object(finder, '_read_pdf_info', return_value=None):
             with patch.object(finder, '_calculate_hash', return_value='abc123') as mock_hash:
                 entries = [
                     PdfEntry(fullname="/test/test.pdf", size=100, hash="")
@@ -267,8 +266,9 @@ class TestFinderValidatePdfs:
         entries = [PdfEntry(fullname=str(invalid_pdf), size=invalid_pdf.stat().st_size, hash="")]
         result = finder.validate_pdfs(entries)
         
-        # Should return empty list for invalid PDF
-        assert len(result) == 0
+        # Invalid entries should remain in result with is_valid=False
+        assert len(result) == 1
+        assert result[0].is_valid is False
     
     def test_validate_calls_callback(self, finder):
         """Test that callback is called during validation."""
@@ -558,8 +558,6 @@ class TestFinderCopyFiles:
     
     def test_copy_overwrite_remove_failure(self, temp_dir, sample_pdf_content, finder):
         """Test copy when remove of existing file fails."""
-        import os
-        
         source = temp_dir / "test.pdf"
         source.write_bytes(sample_pdf_content)
         

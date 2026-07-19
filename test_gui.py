@@ -1,8 +1,6 @@
-import os
 import json
 import pytest
-from unittest.mock import patch, MagicMock
-from pathlib import Path
+from unittest.mock import patch
 
 from pdfcrawler import SettingsManager
 
@@ -24,7 +22,7 @@ class TestSettingsManager:
     def test_init_creates_dir(self, settings_file):
         """Test that SettingsManager creates the settings directory."""
         sf, settings_dir = settings_file
-        sm = SettingsManager()
+        SettingsManager()
         assert settings_dir.exists()
 
     def test_init_loads_empty(self, settings_file):

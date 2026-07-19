@@ -3,20 +3,17 @@ import json
 import logging
 import threading
 from pathlib import Path
-from tkinter import END, LEFT, RIGHT, TOP, BOTTOM, BOTH, X, Y, DISABLED, NORMAL, W, E, CENTER
+from tkinter import font as tkfont
+from tkinter import END, LEFT, RIGHT, BOTTOM, BOTH, X, Y, DISABLED, NORMAL, W, CENTER, TclError
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as tkb
-from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, INFO, WARNING
+from ttkbootstrap.constants import SUCCESS, INDETERMINATE, INFO, WARNING
 from ttkbootstrap.widgets.scrolled import ScrolledFrame
 
 from engine import (
-    CALLBACK_FILE_FOUND,
-    CALLBACK_FILE_VALIDATED,
-    CALLBACK_FILE_COPIED,
     CallBack,
     Finder,
-    PdfEntry,
 )
 
 SETTINGS_DIR = Path.home() / ".pdfcrawler"
@@ -95,6 +92,9 @@ class PDFCrawler(tkb.Window):
         ("path", "Path", 300, W, "fullname"),
     ]
 
+    INVALID_TAG = "invalid"
+    DUPLICATE_TAG = "duplicate"
+
     def __init__(self, root: tkb.Window) -> None:
         root.geometry("1280x800")
         root.minsize(900, 600)
@@ -110,10 +110,14 @@ class PDFCrawler(tkb.Window):
         self.selected_ids: set = set()
         self.sort_column: str = "size"
         self.sort_ascending: bool = False
+        self.visible_entry_ids: set[str] = set()
+        self.current_search_folder: str | None = None
 
         # Operation state
+        self.ui_busy = False
         self.operation_cancelled = False
         self.operation_thread: threading.Thread | None = None
+        self.current_observer: OperationObserver | None = None
 
         # Apply saved theme
         saved_theme = self.settings.get_theme()
@@ -131,6 +135,7 @@ class PDFCrawler(tkb.Window):
 
         # Populate recent folders
         self._refresh_recent_folders()
+        self._refresh_frequent_destinations()
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -203,11 +208,14 @@ class PDFCrawler(tkb.Window):
     # ------------------------------------------------------------------
 
     def _create_search_section(self) -> None:
-        section = tkb.LabelFrame(self.root, text="Search", padding=10)
+        section = tkb.LabelFrame(self.root, text="Search")
         section.pack(fill=X, padx=10, pady=5)
 
+        content = tkb.Frame(section)
+        content.pack(fill=X, padx=10, pady=10)
+
         # Folder row
-        folder_row = tkb.Frame(section)
+        folder_row = tkb.Frame(content)
         folder_row.pack(fill=X, pady=(0, 8))
 
         tkb.Label(folder_row, text="Folder:", width=10, anchor=W).pack(
@@ -238,7 +246,7 @@ class PDFCrawler(tkb.Window):
         )
 
         # Filters row
-        filters_row = tkb.Frame(section)
+        filters_row = tkb.Frame(content)
         filters_row.pack(fill=X)
 
         # Page filter
@@ -271,11 +279,12 @@ class PDFCrawler(tkb.Window):
         dup_frame = tkb.Frame(filters_row)
         dup_frame.pack(side=LEFT, padx=(0, 20))
         self.dup_var = tkb.BooleanVar(value=True)
-        tkb.Checkbutton(
+        self.chk_duplicates = tkb.Checkbutton(
             dup_frame,
             text="Detect duplicates",
             variable=self.dup_var,
-        ).pack(side=LEFT, padx=(0, 5))
+        )
+        self.chk_duplicates.pack(side=LEFT, padx=(0, 5))
 
         # Buttons
         btn_row = tkb.Frame(filters_row)
@@ -369,6 +378,12 @@ class PDFCrawler(tkb.Window):
         self.tree.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
 
+        base_font = tkfont.nametofont("TkDefaultFont")
+        invalid_font = base_font.copy()
+        invalid_font.configure(overstrike=1)
+        self.tree.tag_configure(self.INVALID_TAG, font=invalid_font)
+        self.tree.tag_configure(self.DUPLICATE_TAG)
+
         # Bind double-click for checkbox toggle
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
@@ -397,6 +412,26 @@ class PDFCrawler(tkb.Window):
         self.btn_deselect_all.pack(side=LEFT)
 
         # Right: copy + export
+        dest_frame = tkb.Frame(actions)
+        dest_frame.pack(side=RIGHT, padx=(0, 10))
+
+        tkb.Label(dest_frame, text="Destination:").pack(side=LEFT, padx=(0, 5))
+        self.cmb_destination = tkb.Combobox(
+            dest_frame,
+            values=[],
+            width=36,
+            state="readonly",
+        )
+        self.cmb_destination.pack(side=LEFT, padx=(0, 5))
+
+        self.btn_dest_browse = tkb.Button(
+            dest_frame,
+            text="Browse...",
+            command=self._on_pick_destination,
+            width=11,
+        )
+        self.btn_dest_browse.pack(side=LEFT)
+
         act_frame = tkb.Frame(actions)
         act_frame.pack(side=RIGHT)
 
@@ -424,8 +459,8 @@ class PDFCrawler(tkb.Window):
     # ------------------------------------------------------------------
 
     def _create_status_bar(self) -> None:
-        self.status_bar = tkb.Frame(self.root, padding=(10, 5))
-        self.status_bar.pack(fill=X, side=BOTTOM)
+        self.status_bar = tkb.Frame(self.root)
+        self.status_bar.pack(fill=X, side=BOTTOM, padx=10, pady=(0, 5))
 
         self.lbl_status_found = tkb.Label(
             self.status_bar, text="Found: 0"
@@ -490,7 +525,7 @@ class PDFCrawler(tkb.Window):
 
     def _on_space(self, event=None) -> None:
         """Toggle selection on the currently focused tree item."""
-        iid = self.tree.focus_get()
+        iid = self.tree.focus()
         if iid:
             self._toggle_selection(iid)
         return "break"
@@ -509,6 +544,17 @@ class PDFCrawler(tkb.Window):
         if folders:
             self.cmb_recent.set(folders[0])
 
+    def _refresh_frequent_destinations(self) -> None:
+        folders = self.settings.get_frequent_destinations()
+        self.cmb_destination.config(values=folders)
+        if folders and not self.cmb_destination.get().strip():
+            self.cmb_destination.set(folders[0])
+
+    def _on_pick_destination(self) -> None:
+        folder = filedialog.askdirectory(title="Select Destination Folder")
+        if folder:
+            self.cmb_destination.set(folder)
+
     def _on_recent_folder_selected(self, event=None) -> None:
         val = self.cmb_recent.get()
         if val:
@@ -516,8 +562,13 @@ class PDFCrawler(tkb.Window):
             self.etr_folder.insert(0, val)
 
     def _clear_tree(self) -> None:
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        existing_ids = set(self.tree.get_children())
+        existing_ids.update(entry.fullname for entry in self.all_entries)
+        for iid in existing_ids:
+            try:
+                self.tree.delete(iid)
+            except TclError:
+                pass
 
     def _populate_tree(self, entries: list) -> None:
         """Populate the treeview with PdfEntry objects."""
@@ -525,6 +576,7 @@ class PDFCrawler(tkb.Window):
         saved_selection = self.selected_ids.copy()
         self._clear_tree()
         self.all_entries = list(entries)
+        self.selected_ids = set()
 
         for entry in entries:
             iid = entry.fullname  # Use full path as item ID (unique)
@@ -532,38 +584,51 @@ class PDFCrawler(tkb.Window):
             author = entry.info.get("author", "") if entry.info else ""
             pages = entry.pages if entry.pages is not None else ""
             size_str = Finder.convert_size(entry.size)
-            path = Path(entry.fullname).name
+            if self.current_search_folder:
+                try:
+                    path = str(Path(entry.fullname).relative_to(self.current_search_folder))
+                except ValueError:
+                    path = Path(entry.fullname).name
+            else:
+                path = Path(entry.fullname).name
             is_selected = iid in saved_selection
+            if is_selected:
+                self.selected_ids.add(iid)
 
             values = (
-                "☑" if is_selected else ("☐" if not entry.is_duplicate else "☑"),
+                "☑" if is_selected else "☐",
                 title,
                 author,
                 pages,
                 size_str,
                 path,
             )
-            tags = ("duplicate," if entry.is_duplicate else "",)
+            tags = []
+            if entry.is_duplicate:
+                tags.append(self.DUPLICATE_TAG)
             if not entry.is_valid:
-                tags = ("invalid," if not entry.is_valid else "") + tags
+                tags.append(self.INVALID_TAG)
 
-            self.tree.insert("", "end", iid=iid, values=values, tags=tags)
+            self.tree.insert("", "end", iid=iid, values=values, tags=tuple(tags))
 
-        # Restore selection set
-        self.selected_ids = saved_selection
+        self.selected_ids &= {entry.fullname for entry in entries}
         self._apply_search_filter()
         self._update_status()
 
     def _apply_search_filter(self) -> None:
-        """Show/hide rows based on search query."""
+        """Show/hide rows based on search query using Treeview detach/move."""
         query = self.search_query.strip().lower()
-        for item in self.tree.get_children():
-            values = self.tree.item(item, "values")
-            if not query:
-                self.tree.item(item, displayvalues=None)
-                continue
-            match = any(query in str(v).lower() for v in values)
-            self.tree.item(item, displayvalues=None if match else None)
+        self.visible_entry_ids = set()
+        for entry in self.all_entries:
+            iid = entry.fullname
+            values = self.tree.item(iid, "values")
+            haystack = " ".join(str(v).lower() for v in values)
+            match = not query or query in haystack
+            if match:
+                self.tree.move(iid, "", "end")
+                self.visible_entry_ids.add(iid)
+            else:
+                self.tree.detach(iid)
 
     def _on_search_filter(self, event=None) -> None:
         self.search_query = self.etr_search.get()
@@ -572,8 +637,6 @@ class PDFCrawler(tkb.Window):
 
     def _on_tree_double_click(self, event) -> None:
         """Toggle checkbox when user double-clicks a tree cell."""
-        # Get the column at click position
-        self.tree.identify_column(event.x)
         col = self.tree.identify_column(event.x)
         if col == "#1":  # Checkbox column
             iid = self.tree.identify_row(event.y)
@@ -583,7 +646,6 @@ class PDFCrawler(tkb.Window):
     def _toggle_selection(self, iid: str) -> None:
         item = self.tree.item(iid)
         values = list(item["values"])
-        current = values[0]
 
         if iid in self.selected_ids:
             self.selected_ids.discard(iid)
@@ -604,21 +666,16 @@ class PDFCrawler(tkb.Window):
         return result
 
     def _on_select_all(self) -> None:
-        for item in self.tree.get_children():
-            iid = item
+        for iid in self.tree.get_children():
             values = list(self.tree.item(iid, "values"))
-            # Only select visible items
-            display = self.tree.item(iid, "displayvalues")
-            if display is not None:
-                self.selected_ids.add(iid)
-                values[0] = "☑"
+            self.selected_ids.add(iid)
+            values[0] = "☑"
             self.tree.item(iid, values=tuple(values))
         self._update_status()
 
     def _on_deselect_all(self) -> None:
         self.selected_ids = set()
-        for item in self.tree.get_children():
-            iid = item
+        for iid in self.tree.get_children():
             values = list(self.tree.item(iid, "values"))
             values[0] = "☐"
             self.tree.item(iid, values=tuple(values))
@@ -643,9 +700,6 @@ class PDFCrawler(tkb.Window):
                 break
 
         if sort_key:
-            # Save current selection
-            saved_selection = self.selected_ids.copy()
-
             self.all_entries.sort(
                 key=lambda e: (
                     e.__dict__.get(sort_key, "") is None,
@@ -655,8 +709,7 @@ class PDFCrawler(tkb.Window):
             )
             # Rebuild display (preserves selection via saved_ids restore)
             self._populate_tree(self.all_entries)
-            # Restore selection
-            self.selected_ids = saved_selection
+            self.selected_ids &= {entry.fullname for entry in self.all_entries}
 
     # ------------------------------------------------------------------
     # Status bar
@@ -675,34 +728,55 @@ class PDFCrawler(tkb.Window):
         self.lbl_status_selected.config(text=f"Selected: {selected}")
         self.lbl_status_size.config(text=f"Size: {Finder.convert_size(selected_size)}")
 
+    def _clear_results_state(self) -> None:
+        self.search_query = ""
+        self.etr_search.delete(0, END)
+        self.selected_ids = set()
+        self.visible_entry_ids = set()
+        self._clear_tree()
+        self.all_entries = []
+        self._update_status()
+
     # ------------------------------------------------------------------
     # Operation controls
     # ------------------------------------------------------------------
 
     def _set_ui_busy(self, busy: bool) -> None:
         """Enable/disable controls during operations."""
+        self.ui_busy = busy
         state = DISABLED if busy else NORMAL
-        ro_state = "readonly" if busy else DISABLED
+        ro_state = DISABLED if busy else "readonly"
 
         self.btn_search.config(state=state)
         self.btn_browse.config(state=state)
-        self.btn_copy.config(state=DISABLED)  # Disabled until search completes
-        self.btn_csv.config(state=DISABLED)
+        if busy:
+            self.btn_copy.config(state=DISABLED)
+            self.btn_csv.config(state=DISABLED)
+        else:
+            has_entries = len(self.all_entries) > 0
+            self.btn_copy.config(state=NORMAL if has_entries else DISABLED)
+            self.btn_csv.config(state=NORMAL if has_entries else DISABLED)
         self.btn_select_all.config(state=state)
         self.btn_deselect_all.config(state=state)
+        self.btn_dest_browse.config(state=state)
+        self.chk_duplicates.config(state=state)
         self.etr_folder.config(state=state)
         self.cmb_pages.config(state=ro_state)
         self.cmb_size.config(state=ro_state)
         self.cmb_recent.config(state=ro_state)
+        self.cmb_destination.config(state=ro_state)
 
         if busy:
             self.btn_cancel.config(state=NORMAL)
         else:
             self.btn_cancel.config(state=DISABLED)
             self.operation_cancelled = False
+            self.current_observer = None
 
     def on_cancel(self) -> None:
         self.operation_cancelled = True
+        if self.current_observer:
+            self.current_observer.cancel()
         self.lbl_progress.config(text="Cancelling...")
 
     def on_browse_folder(self) -> None:
@@ -729,6 +803,9 @@ class PDFCrawler(tkb.Window):
     # ------------------------------------------------------------------
 
     def on_search(self) -> None:
+        if self.ui_busy:
+            return
+
         folder = self.etr_folder.get().strip()
         if not folder or not os.path.isdir(folder):
             messagebox.showerror(
@@ -738,33 +815,44 @@ class PDFCrawler(tkb.Window):
             )
             return
 
+        page_filter = self._parse_page_filter()
+        size_filter = self._parse_size_filter()
+        detect = self.dup_var.get()
+        self.current_search_folder = folder
+
         # Save to recent
         self.settings.add_recent_folder(folder)
         self._refresh_recent_folders()
+
+        self._clear_results_state()
 
         # Set up progress
         self.progressbar.config(mode=INDETERMINATE)
         self.progressbar.start(10)
         self.lbl_progress.config(text="Searching...")
         self._set_ui_busy(True)
+        self.operation_cancelled = False
+        observer = OperationObserver(self)
+        self.current_observer = observer
 
-        threading.Thread(
+        self.operation_thread = threading.Thread(
             target=self._run_search,
-            args=(folder,),
+            args=(folder, page_filter, size_filter, detect, observer),
             daemon=True,
-        ).start()
+        )
+        self.operation_thread.start()
 
-    def _run_search(self, folder: str) -> None:
+    def _run_search(
+        self,
+        folder: str,
+        page_filter: int | None,
+        size_filter: int | None,
+        detect: bool,
+        observer: "OperationObserver",
+    ) -> None:
         try:
-            page_filter = self._parse_page_filter()
-            size_filter = self._parse_size_filter()
-            detect = self.dup_var.get()
-
-            observer = OperationObserver(self)
-
             # Step 1: Find PDFs
             self._update_progress("Scanning folder for PDFs...")
-            self.operation_cancelled = False
             pdf_files = self.finder.find_all_pdf_files(folder, observer)
 
             if self.operation_cancelled:
@@ -787,11 +875,6 @@ class PDFCrawler(tkb.Window):
             )
             observer.total = len(pdf_files)
             observer.counter = 0
-            self.progressbar.config(
-                mode="determinate",
-                maximum=len(pdf_files),
-                value=0,
-            )
 
             validated = self.finder.validate_pdfs(
                 pdf_files,
@@ -818,26 +901,28 @@ class PDFCrawler(tkb.Window):
 
         except Exception as e:
             logging.exception("Search error")
+            error_msg = str(e)
             self.root.after(
                 0,
-                lambda: messagebox.showerror(
-                    "Search Error", f"An error occurred: {e}"
+                lambda msg=error_msg: messagebox.showerror(
+                    "Search Error", f"An error occurred: {msg}"
                 ),
             )
             self._finish_search()
 
     def _on_search_complete(self, validated: list) -> None:
         self._populate_tree(validated)
-        self.btn_copy.config(state=NORMAL)
-        self.btn_csv.config(state=NORMAL)
         self.lbl_progress.config(
             text=f"Search complete. {len(validated)} PDFs found."
         )
-        self.progressbar.config(mode="none", value=0)
+        self._reset_progress()
         self._set_ui_busy(False)
 
     def _finish_search(self) -> None:
-        self.progressbar.config(mode="none", value=0)
+        self.root.after(0, self._finish_search_ui)
+
+    def _finish_search_ui(self) -> None:
+        self._reset_progress()
         self._set_ui_busy(False)
 
     # ------------------------------------------------------------------
@@ -845,6 +930,9 @@ class PDFCrawler(tkb.Window):
     # ------------------------------------------------------------------
 
     def on_copy_selected(self) -> None:
+        if self.ui_busy:
+            return
+
         selected = self._get_selected_entries()
         if not selected:
             messagebox.showinfo(
@@ -852,16 +940,36 @@ class PDFCrawler(tkb.Window):
             )
             return
 
-        destination = filedialog.askdirectory(title="Select Destination Folder")
+        destination = self.cmb_destination.get().strip()
+        if destination and not os.path.isdir(destination):
+            messagebox.showerror(
+                "Invalid Folder",
+                f"Destination folder not found: {destination}",
+                icon="error",
+            )
+            return
+
+        if not destination:
+            destination = filedialog.askdirectory(title="Select Destination Folder")
         if not destination:
             return
 
         # Save destination
+        self.cmb_destination.set(destination)
         self.settings.add_frequent_destination(destination)
+        self._refresh_frequent_destinations()
 
         # Filter out duplicates — copy only unique files
         files_to_copy = [e for e in selected if not e.is_duplicate]
         duplicate_count = len(selected) - len(files_to_copy)
+
+        if not files_to_copy:
+            messagebox.showinfo(
+                "No Files to Copy",
+                "All selected files are marked as duplicates.",
+                icon=INFO,
+            )
+            return
 
         if duplicate_count > 0:
             self.lbl_progress.config(
@@ -872,24 +980,27 @@ class PDFCrawler(tkb.Window):
         self.progressbar.start(10)
         self.lbl_progress.config(text="Copying files...")
         self._set_ui_busy(True)
+        self.operation_cancelled = False
 
-        threading.Thread(
+        observer = OperationObserver(self)
+        observer.total = len(files_to_copy)
+        observer.counter = 0
+        self.current_observer = observer
+
+        self.operation_thread = threading.Thread(
             target=self._run_copy,
-            args=(files_to_copy, destination),
+            args=(files_to_copy, destination, observer),
             daemon=True,
-        ).start()
+        )
+        self.operation_thread.start()
 
-    def _run_copy(self, files: list, destination: str) -> None:
+    def _run_copy(
+        self,
+        files: list,
+        destination: str,
+        observer: "OperationObserver",
+    ) -> None:
         try:
-            observer = OperationObserver(self)
-            observer.total = len(files)
-            observer.counter = 0
-            self.progressbar.config(
-                mode="determinate",
-                maximum=len(files),
-                value=0,
-            )
-
             copied = self.finder.copy_files(
                 files, destination, callback=observer
             )
@@ -904,25 +1015,33 @@ class PDFCrawler(tkb.Window):
             else:
                 self.root.after(
                     0,
-                    lambda: messagebox.showinfo(
+                    lambda copied_count=len(copied): messagebox.showinfo(
                         "Copy Complete",
-                        f"Successfully copied {len(copied)} file(s).",
+                        f"Successfully copied {copied_count} file(s).",
                     ),
                 )
         except Exception as e:
             logging.exception("Copy error")
+            error_msg = str(e)
             self.root.after(
                 0,
-                lambda: messagebox.showerror(
-                    "Copy Error", f"An error occurred: {e}"
+                lambda msg=error_msg: messagebox.showerror(
+                    "Copy Error", f"An error occurred: {msg}"
                 ),
             )
         finally:
             self._finish_copy()
 
     def _finish_copy(self) -> None:
-        self.progressbar.config(mode="none", value=0)
+        self.root.after(0, self._finish_copy_ui)
+
+    def _finish_copy_ui(self) -> None:
+        self._reset_progress()
         self._set_ui_busy(False)
+
+    def _reset_progress(self) -> None:
+        self.progressbar.stop()
+        self.progressbar.config(mode=INDETERMINATE, value=0)
 
     # ------------------------------------------------------------------
     # CSV export
@@ -930,10 +1049,7 @@ class PDFCrawler(tkb.Window):
 
     def on_export_csv(self) -> None:
         # Export all entries currently displayed (respecting search filter)
-        items = []
-        for child in self.tree.get_children():
-            if self.tree.item(child, "displayvalues") is not None or not self.search_query:
-                items.append(child)
+        items = list(self.visible_entry_ids)
 
         if not items:
             messagebox.showinfo(
@@ -994,8 +1110,18 @@ class OperationObserver(CallBack):
     def _update_ui(self, message: str, count: int, total: int) -> None:
         if self.app.operation_cancelled:
             return
-        self.app.lbl_progress.config(text=f"{message} ({count}/{total})")
-        self.app.progressbar.config(mode="determinate", maximum=total, value=count)
+
+        if total > 0:
+            max_value = total
+            value = count if count <= total else total
+            self.app.lbl_progress.config(text=f"{message} ({count}/{total})")
+            self.app.progressbar.config(
+                mode="determinate",
+                maximum=max_value,
+                value=value,
+            )
+        else:
+            self.app.lbl_progress.config(text=message)
 
 
 if __name__ == "__main__":
