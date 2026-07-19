@@ -4,12 +4,11 @@ import logging
 import threading
 from pathlib import Path
 from tkinter import font as tkfont
-from tkinter import END, LEFT, RIGHT, BOTTOM, BOTH, X, Y, DISABLED, NORMAL, W, CENTER, TclError
+from tkinter import END, LEFT, RIGHT, BOTTOM, BOTH, X, DISABLED, NORMAL, W, CENTER, TclError, Toplevel
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import SUCCESS, INDETERMINATE, INFO, WARNING
-from ttkbootstrap.widgets.scrolled import ScrolledFrame
 
 from engine import (
     CallBack,
@@ -84,16 +83,24 @@ class PDFCrawler(tkb.Window):
 
     # Column configuration: (id, text, width, anchor, sort_key)
     COLUMNS = [
-        ("select", "☐", 40, CENTER, None),
-        ("title", "Title", 250, W, "title"),
-        ("author", "Author", 150, W, "author"),
-        ("pages", "Pages", 70, CENTER, "pages"),
-        ("size", "Size", 90, CENTER, "size"),
-        ("path", "Path", 300, W, "fullname"),
+        ("select", "☐", 56, 56, CENTER, None, False),
+        ("title", "Title", 220, 320, W, "title", True),
+        ("author", "Author", 180, 240, W, "author", True),
+        ("pages", "Pages", 90, 110, CENTER, "pages", False),
+        ("size", "Size", 110, 130, CENTER, "size", False),
+        ("path", "Path", 400, 700, W, "fullname", True),
     ]
 
     INVALID_TAG = "invalid"
     DUPLICATE_TAG = "duplicate"
+    ROW_EVEN_TAG = "row_even"
+    ROW_ODD_TAG = "row_odd"
+    TABLE_STYLE = "PDFCrawler.Treeview"
+    COLUMN_WEIGHTS = {
+        "title": 3,
+        "author": 2,
+        "path": 7,
+    }
 
     def __init__(self, root: tkb.Window) -> None:
         root.geometry("1280x800")
@@ -112,6 +119,12 @@ class PDFCrawler(tkb.Window):
         self.sort_ascending: bool = False
         self.visible_entry_ids: set[str] = set()
         self.current_search_folder: str | None = None
+        self.column_index = {col[0]: i for i, col in enumerate(self.COLUMNS)}
+        self.full_path_by_iid: dict[str, str] = {}
+        self.truncated_path_ids: set[str] = set()
+        self.path_tooltip_window: Toplevel | None = None
+        self.path_tooltip_label = None
+        self.path_tooltip_iid: str | None = None
 
         # Operation state
         self.ui_busy = False
@@ -125,6 +138,7 @@ class PDFCrawler(tkb.Window):
             tkb.Style().theme_use(saved_theme)
 
         # Build UI
+        self._configure_table_style()
         self._create_menu()
         self._create_top_bar()
         self._create_search_section()
@@ -136,6 +150,24 @@ class PDFCrawler(tkb.Window):
         # Populate recent folders
         self._refresh_recent_folders()
         self._refresh_frequent_destinations()
+
+    def _configure_table_style(self) -> None:
+        style = tkb.Style()
+        body_font = tkfont.nametofont("TkDefaultFont").copy()
+        body_font.configure(size=12)
+        self.table_body_font = body_font
+        heading_font = tkfont.nametofont("TkHeadingFont").copy()
+        heading_font.configure(size=13, weight="bold")
+
+        style.configure(
+            self.TABLE_STYLE,
+            font=body_font,
+            rowheight=36,
+        )
+        style.configure(
+            f"{self.TABLE_STYLE}.Heading",
+            font=heading_font,
+        )
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -200,8 +232,25 @@ class PDFCrawler(tkb.Window):
         try:
             tkb.Style().theme_use(new_theme)
             self.settings.set_theme(new_theme)
+            self._configure_row_striping_for_current_theme()
         except Exception:
             pass
+
+    def _configure_row_striping_for_current_theme(self) -> None:
+        if not hasattr(self, "tree"):
+            return
+
+        theme = tkb.Style().theme_use()
+        if theme == "darkly":
+            even_bg = "#262a2f"
+            odd_bg = "#2f343b"
+        else:
+            even_bg = "#f5f7fa"
+            odd_bg = "#eaf0f7"
+
+        self.tree.tag_configure(self.ROW_EVEN_TAG, background=even_bg)
+        self.tree.tag_configure(self.ROW_ODD_TAG, background=odd_bg)
+        self._refresh_row_tags()
 
     # ------------------------------------------------------------------
     # Search controls
@@ -345,47 +394,76 @@ class PDFCrawler(tkb.Window):
         self.etr_search.pack(side=LEFT, fill=X, expand=True)
         self.etr_search.bind("<KeyRelease>", self._on_search_filter)
 
-        # Table
-        table_frame = ScrolledFrame(section)
-        table_frame.pack(fill=BOTH, expand=True, pady=(3, 5))
+        # Table container
+        self.table_wrapper = tkb.Frame(section)
+        self.table_wrapper.pack(fill=BOTH, expand=True, pady=(3, 5))
+        self.table_wrapper.grid_rowconfigure(0, weight=1)
+        self.table_wrapper.grid_columnconfigure(0, weight=1)
 
         # Build treeview
         self.tree = tkb.Treeview(
-            table_frame,
+            self.table_wrapper,
             columns=[c[0] for c in self.COLUMNS],
             show="headings",
             selectmode="extended",
+            style=self.TABLE_STYLE,
         )
 
         # Define headings
-        col_defs = []
-        for col_id, text, width, anchor, sort_key in self.COLUMNS:
+        for col_id, text, min_width, width, anchor, sort_key, stretch in self.COLUMNS:
             self.tree.heading(
                 col_id,
                 text=text,
                 command=lambda c=col_id: self._on_sort_column(c),
             )
-            self.tree.column(col_id, width=width, anchor=anchor)
-            col_defs.append(col_id)
+            self.tree.column(
+                col_id,
+                minwidth=min_width,
+                width=width,
+                stretch=stretch,
+                anchor=anchor,
+            )
 
-        # Vertical scrollbar
-        scrollbar = tkb.Scrollbar(
-            table_frame, orient="vertical", command=self.tree.yview
+        self.tree.heading("select", command=self._on_toggle_select_visible)
+
+        # Scrollbars
+        scrollbar_y = tkb.Scrollbar(
+            self.table_wrapper,
+            orient="vertical",
+            command=self.tree.yview,
+            bootstyle="round",
         )
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar_x = tkb.Scrollbar(
+            self.table_wrapper,
+            orient="horizontal",
+            command=self.tree.xview,
+            bootstyle="round",
+        )
+        self.tree.configure(
+            yscrollcommand=scrollbar_y.set,
+            xscrollcommand=scrollbar_x.set,
+        )
 
-        # Layout treeview + scrollbar
-        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
-        scrollbar.pack(side=RIGHT, fill=Y)
+        # Layout treeview + scrollbars
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar_y.grid(row=0, column=1, sticky="ns")
+        scrollbar_x.grid(row=1, column=0, sticky="ew")
 
-        base_font = tkfont.nametofont("TkDefaultFont")
+        base_font = tkfont.nametofont("TkDefaultFont").copy()
+        base_font.configure(size=14)
         invalid_font = base_font.copy()
         invalid_font.configure(overstrike=1)
         self.tree.tag_configure(self.INVALID_TAG, font=invalid_font)
         self.tree.tag_configure(self.DUPLICATE_TAG)
+        self.tree.tag_configure(self.ROW_EVEN_TAG)
+        self.tree.tag_configure(self.ROW_ODD_TAG)
+        self._configure_row_striping_for_current_theme()
 
         # Bind double-click for checkbox toggle
         self.tree.bind("<Double-1>", self._on_tree_double_click)
+        self.tree.bind("<Motion>", self._on_tree_hover)
+        self.tree.bind("<Leave>", self._on_tree_leave)
+        self.table_wrapper.bind("<Configure>", self._on_table_resize)
 
         # Action buttons
         actions = tkb.Frame(section)
@@ -453,6 +531,8 @@ class PDFCrawler(tkb.Window):
             state=DISABLED,
         )
         self.btn_csv.pack(side=LEFT)
+
+        self.root.after(0, self._resize_columns_to_fit)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -569,6 +649,7 @@ class PDFCrawler(tkb.Window):
                 self.tree.delete(iid)
             except TclError:
                 pass
+        self._hide_path_tooltip()
 
     def _populate_tree(self, entries: list) -> None:
         """Populate the treeview with PdfEntry objects."""
@@ -577,6 +658,8 @@ class PDFCrawler(tkb.Window):
         self._clear_tree()
         self.all_entries = list(entries)
         self.selected_ids = set()
+        self.full_path_by_iid = {}
+        self.truncated_path_ids = set()
 
         for entry in entries:
             iid = entry.fullname  # Use full path as item ID (unique)
@@ -591,6 +674,7 @@ class PDFCrawler(tkb.Window):
                     path = Path(entry.fullname).name
             else:
                 path = Path(entry.fullname).name
+            self.full_path_by_iid[iid] = path
             is_selected = iid in saved_selection
             if is_selected:
                 self.selected_ids.add(iid)
@@ -612,13 +696,17 @@ class PDFCrawler(tkb.Window):
             self.tree.insert("", "end", iid=iid, values=values, tags=tuple(tags))
 
         self.selected_ids &= {entry.fullname for entry in entries}
+        self._resize_columns_to_fit()
+        self._refresh_path_column_display()
         self._apply_search_filter()
+        self._refresh_row_tags()
         self._update_status()
 
     def _apply_search_filter(self) -> None:
         """Show/hide rows based on search query using Treeview detach/move."""
         query = self.search_query.strip().lower()
         self.visible_entry_ids = set()
+        self._hide_path_tooltip()
         for entry in self.all_entries:
             iid = entry.fullname
             values = self.tree.item(iid, "values")
@@ -629,11 +717,162 @@ class PDFCrawler(tkb.Window):
                 self.visible_entry_ids.add(iid)
             else:
                 self.tree.detach(iid)
+        self._refresh_row_tags()
 
     def _on_search_filter(self, event=None) -> None:
         self.search_query = self.etr_search.get()
         self._apply_search_filter()
         self._update_status()
+
+    def _on_table_resize(self, event=None) -> None:
+        self._resize_columns_to_fit()
+        self._refresh_path_column_display()
+
+    def _resize_columns_to_fit(self) -> None:
+        if not hasattr(self, "tree"):
+            return
+
+        table_width = self.tree.winfo_width()
+        if table_width <= 1:
+            return
+
+        fixed_columns = [col for col in self.COLUMNS if not col[6]]
+        stretch_columns = [col for col in self.COLUMNS if col[6]]
+
+        fixed_total = sum(col[3] for col in fixed_columns)
+        available_stretch = max(table_width - fixed_total - 6, 0)
+
+        for col in fixed_columns:
+            col_id = col[0]
+            min_width = col[2]
+            width = col[3]
+            self.tree.column(col_id, width=max(min_width, width), minwidth=min_width)
+
+        if not stretch_columns:
+            return
+
+        min_total = sum(col[2] for col in stretch_columns)
+        extra = max(available_stretch - min_total, 0)
+        weight_total = sum(self.COLUMN_WEIGHTS.get(col[0], 1) for col in stretch_columns)
+
+        for col in stretch_columns:
+            col_id = col[0]
+            min_width = col[2]
+            anchor = col[4]
+            weight = self.COLUMN_WEIGHTS.get(col_id, 1)
+            width = min_width
+            if weight_total > 0:
+                width += int(extra * weight / weight_total)
+            self.tree.column(
+                col_id,
+                width=width,
+                minwidth=min_width,
+                anchor=anchor,
+                stretch=True,
+            )
+
+    def _truncate_tail_text(self, text: str, max_pixels: int) -> str:
+        if max_pixels <= 0:
+            return text
+
+        if self.table_body_font.measure(text) <= max_pixels:
+            return text
+
+        ellipsis = "..."
+        if self.table_body_font.measure(ellipsis) >= max_pixels:
+            return ellipsis
+
+        lo = 1
+        hi = len(text)
+        best = ellipsis
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = f"{ellipsis}{text[-mid:]}"
+            if self.table_body_font.measure(candidate) <= max_pixels:
+                best = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        return best
+
+    def _refresh_path_column_display(self) -> None:
+        path_idx = self.column_index["path"]
+        col_width = int(self.tree.column("path", "width"))
+        text_width = max(40, col_width - 24)
+
+        self.truncated_path_ids = set()
+        for iid, full_text in self.full_path_by_iid.items():
+            try:
+                values = list(self.tree.item(iid, "values"))
+            except TclError:
+                continue
+
+            if len(values) <= path_idx:
+                continue
+
+            display_text = self._truncate_tail_text(full_text, text_width)
+            values[path_idx] = display_text
+            self.tree.item(iid, values=tuple(values))
+
+            if display_text != full_text:
+                self.truncated_path_ids.add(iid)
+
+    def _show_path_tooltip(self, iid: str, x_root: int, y_root: int) -> None:
+        full_text = self.full_path_by_iid.get(iid, "")
+        if not full_text:
+            self._hide_path_tooltip()
+            return
+
+        if self.path_tooltip_window is None:
+            self.path_tooltip_window = Toplevel(self.root)
+            self.path_tooltip_window.withdraw()
+            self.path_tooltip_window.overrideredirect(True)
+            self.path_tooltip_window.attributes("-topmost", True)
+            self.path_tooltip_label = tkb.Label(
+                self.path_tooltip_window,
+                text="",
+                anchor=W,
+                justify=LEFT,
+                padding=(8, 4),
+            )
+            self.path_tooltip_label.pack(fill=BOTH, expand=True)
+
+        self.path_tooltip_iid = iid
+        self.path_tooltip_label.config(text=full_text)
+        self.path_tooltip_window.geometry(f"+{x_root + 16}+{y_root + 16}")
+        self.path_tooltip_window.deiconify()
+
+    def _hide_path_tooltip(self) -> None:
+        self.path_tooltip_iid = None
+        if self.path_tooltip_window is not None:
+            self.path_tooltip_window.withdraw()
+
+    def _on_tree_hover(self, event) -> None:
+        row_id = self.tree.identify_row(event.y)
+        col_id = self.tree.identify_column(event.x)
+        path_col = f"#{self.column_index['path'] + 1}"
+
+        if not row_id or col_id != path_col:
+            self._hide_path_tooltip()
+            return
+
+        if row_id not in self.truncated_path_ids:
+            self._hide_path_tooltip()
+            return
+
+        self._show_path_tooltip(row_id, event.x_root, event.y_root)
+
+    def _on_tree_leave(self, event=None) -> None:
+        self._hide_path_tooltip()
+
+    def _refresh_row_tags(self) -> None:
+        visible = list(self.tree.get_children())
+        for idx, iid in enumerate(visible):
+            tags = list(self.tree.item(iid, "tags"))
+            tags = [t for t in tags if t not in (self.ROW_EVEN_TAG, self.ROW_ODD_TAG)]
+            tags.append(self.ROW_EVEN_TAG if idx % 2 == 0 else self.ROW_ODD_TAG)
+            self.tree.item(iid, tags=tuple(tags))
 
     def _on_tree_double_click(self, event) -> None:
         """Toggle checkbox when user double-clicks a tree cell."""
@@ -671,6 +910,7 @@ class PDFCrawler(tkb.Window):
             self.selected_ids.add(iid)
             values[0] = "☑"
             self.tree.item(iid, values=tuple(values))
+        self._refresh_row_tags()
         self._update_status()
 
     def _on_deselect_all(self) -> None:
@@ -679,6 +919,30 @@ class PDFCrawler(tkb.Window):
             values = list(self.tree.item(iid, "values"))
             values[0] = "☐"
             self.tree.item(iid, values=tuple(values))
+        self._refresh_row_tags()
+        self._update_status()
+
+    def _on_toggle_select_visible(self) -> None:
+        if not self.visible_entry_ids:
+            return
+
+        visible = list(self.tree.get_children())
+        all_selected = all(iid in self.selected_ids for iid in visible)
+
+        if all_selected:
+            for iid in visible:
+                self.selected_ids.discard(iid)
+                values = list(self.tree.item(iid, "values"))
+                values[0] = "☐"
+                self.tree.item(iid, values=tuple(values))
+        else:
+            for iid in visible:
+                self.selected_ids.add(iid)
+                values = list(self.tree.item(iid, "values"))
+                values[0] = "☑"
+                self.tree.item(iid, values=tuple(values))
+
+        self._refresh_row_tags()
         self._update_status()
 
     def _on_sort_column(self, col_id: str) -> None:
@@ -694,7 +958,7 @@ class PDFCrawler(tkb.Window):
 
         # Find the sort key from column config
         sort_key = None
-        for col_id_def, _, _, _, key in self.COLUMNS:
+        for col_id_def, _, _, _, _, key, _ in self.COLUMNS:
             if col_id_def == col_id:
                 sort_key = key
                 break
@@ -710,6 +974,7 @@ class PDFCrawler(tkb.Window):
             # Rebuild display (preserves selection via saved_ids restore)
             self._populate_tree(self.all_entries)
             self.selected_ids &= {entry.fullname for entry in self.all_entries}
+            self._refresh_row_tags()
 
     # ------------------------------------------------------------------
     # Status bar
@@ -733,6 +998,9 @@ class PDFCrawler(tkb.Window):
         self.etr_search.delete(0, END)
         self.selected_ids = set()
         self.visible_entry_ids = set()
+        self.full_path_by_iid = {}
+        self.truncated_path_ids = set()
+        self._hide_path_tooltip()
         self._clear_tree()
         self.all_entries = []
         self._update_status()
@@ -912,6 +1180,8 @@ class PDFCrawler(tkb.Window):
 
     def _on_search_complete(self, validated: list) -> None:
         self._populate_tree(validated)
+        self._resize_columns_to_fit()
+        self._refresh_path_column_display()
         self.lbl_progress.config(
             text=f"Search complete. {len(validated)} PDFs found."
         )
