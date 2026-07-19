@@ -1,431 +1,1127 @@
-from ast import Call
-from gc import callbacks
 import os
+import json
 import logging
 import threading
 from pathlib import Path
-from tkinter import X, Y, BOTH, DISABLED, END, E, W, YES, LEFT, RIGHT, TOP, BOTTOM
+from tkinter import font as tkfont
+from tkinter import END, LEFT, RIGHT, BOTTOM, BOTH, X, Y, DISABLED, NORMAL, W, CENTER, TclError
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as tkb
-from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, NORMAL, INFO
-from ttkbootstrap.tableview import Tableview
-from ttkbootstrap.scrolled import ScrolledFrame
+from ttkbootstrap.constants import SUCCESS, INDETERMINATE, INFO, WARNING
+from ttkbootstrap.widgets.scrolled import ScrolledFrame
 
-from engine import CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack, Finder
+from engine import (
+    CallBack,
+    Finder,
+)
+
+SETTINGS_DIR = Path.home() / ".pdfcrawler"
+SETTINGS_FILE = SETTINGS_DIR / "settings.json"
+
+RECENT_FOLDERS_KEY = "recent_search_folders"
+FREQUENT_DESTINATIONS_KEY = "frequent_destinations"
+THEME_KEY = "theme"
+MAX_RECENT = 8
+MAX_FREQUENT = 5
+
+
+class SettingsManager:
+    """Persist settings to JSON (~/.pdfcrawler/settings.json)."""
+
+    def __init__(self) -> None:
+        SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        self._data: dict = {}
+        self.load()
+
+    def load(self) -> None:
+        if SETTINGS_FILE.exists():
+            try:
+                self._data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                self._data = {}
+
+    def save(self) -> None:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(
+            json.dumps(self._data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def get_recent_folders(self) -> list:
+        return self._data.get(RECENT_FOLDERS_KEY, [])
+
+    def add_recent_folder(self, folder: str) -> None:
+        folders = self.get_recent_folders()
+        if folder in folders:
+            folders.remove(folder)
+        folders.insert(0, folder)
+        self._data[RECENT_FOLDERS_KEY] = folders[:MAX_RECENT]
+        self.save()
+
+    def get_frequent_destinations(self) -> list:
+        return self._data.get(FREQUENT_DESTINATIONS_KEY, [])
+
+    def add_frequent_destination(self, folder: str) -> None:
+        folders = self.get_frequent_destinations()
+        if folder in folders:
+            folders.remove(folder)
+        folders.insert(0, folder)
+        self._data[FREQUENT_DESTINATIONS_KEY] = folders[:MAX_FREQUENT]
+        self.save()
+
+    def get_theme(self) -> str:
+        return self._data.get(THEME_KEY, "darkly")
+
+    def set_theme(self, theme: str) -> None:
+        self._data[THEME_KEY] = theme
+        self.save()
 
 
 class PDFCrawler(tkb.Window):
-    page_size_translate: dict = {"All": 0, ">5": 5, ">10": 10, ">20": 20}
-    pdf_size_translate: dict = {
-        "All": 0,
-        ">1MB": 1 * 1024 * 1024,
-        ">5MB": 5 * 1024 * 1024,
-        ">10MB": 10 * 1024 * 1024,
-    }
+    page_size_options = ["All", ">5", ">10", ">20", ">50"]
+    pdf_size_options = ["All", ">1MB", ">5MB", ">10MB", ">50MB"]
 
-    def __init__(self, root: tkb.Window):
-        root.geometry("1280x800")  # Increased window size
-        root.minsize(1024, 700)    # Set minimum size
-        root.title("PDF Crawler - Find and Organize Your PDFs")
+    # Column configuration: (id, text, width, anchor, sort_key)
+    COLUMNS = [
+        ("select", "☐", 40, CENTER, None),
+        ("title", "Title", 250, W, "title"),
+        ("author", "Author", 150, W, "author"),
+        ("pages", "Pages", 70, CENTER, "pages"),
+        ("size", "Size", 90, CENTER, "size"),
+        ("path", "Path", 300, W, "fullname"),
+    ]
 
-        self.page_size_options = ["All", ">5", ">10", ">20"]
-        self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
+    INVALID_TAG = "invalid"
+    DUPLICATE_TAG = "duplicate"
+
+    def __init__(self, root: tkb.Window) -> None:
+        root.geometry("1280x800")
+        root.minsize(900, 600)
+        root.title("PDF Crawler")
+
+        self.root = root
         self.finder = Finder()
-        self.root = root  # Store root window reference
+        self.settings = SettingsManager()
 
-        # Create main container with padding
-        self.main_container = tkb.Frame(root, padding=10)
-        self.main_container.pack(fill=BOTH, expand=YES)
+        # Data
+        self.all_entries: list = []  # PdfEntry objects in display order
+        self.search_query: str = ""
+        self.selected_ids: set = set()
+        self.sort_column: str = "size"
+        self.sort_ascending: bool = False
+        self.visible_entry_ids: set[str] = set()
+        self.current_search_folder: str | None = None
 
-        # Create top section for controls
-        self.create_control_section()
-        
-        # Create middle section for progress
-        self.create_progress_section()
-        
-        # Create bottom section for results
-        self.create_results_section()
+        # Operation state
+        self.ui_busy = False
+        self.operation_cancelled = False
+        self.operation_thread: threading.Thread | None = None
+        self.current_observer: OperationObserver | None = None
 
-    def create_control_section(self):
-        """Create the top control section with folder selection and filters"""
-        control_frame = tkb.LabelFrame(
-            self.main_container,
-            text="Search Controls",
-            padding=10,
-            bootstyle=INFO
+        # Apply saved theme
+        saved_theme = self.settings.get_theme()
+        if saved_theme in tkb.Style().theme_names():
+            tkb.Style().theme_use(saved_theme)
+
+        # Build UI
+        self._create_menu()
+        self._create_top_bar()
+        self._create_search_section()
+        self._create_progress_section()
+        self._create_results_section()
+        self._create_status_bar()
+        self._bind_shortcuts()
+
+        # Populate recent folders
+        self._refresh_recent_folders()
+        self._refresh_frequent_destinations()
+
+    # ------------------------------------------------------------------
+    # Menu bar
+    # ------------------------------------------------------------------
+
+    def _create_menu(self) -> None:
+        menubar = tkb.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        file_menu = tkb.Menu(menubar, tearoff=False)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(
+            label="Export CSV",
+            command=self.on_export_csv,
+            accelerator="Ctrl+E",
         )
-        control_frame.pack(fill=X, pady=(0, 10))
+        file_menu.add_command(
+            label="Exit",
+            command=self.root.quit,
+        )
 
-        # Folder selection row
-        folder_frame = tkb.Frame(control_frame)
-        folder_frame.pack(fill=X, pady=(0, 10))
-        
-        self.lbl_folder = tkb.Label(folder_frame, text="Search Folder:", width=12)
-        self.lbl_folder.pack(side=LEFT, padx=(0, 5))
-        
-        self.etr_folder = tkb.Entry(folder_frame)
-        self.etr_folder.insert(0, self.finder.get_current_folder())
-        self.etr_folder.pack(side=LEFT, fill=X, expand=YES, padx=(0, 5))
-        
-        self.btn_pick_folder = tkb.Button(
-            folder_frame,
+    # ------------------------------------------------------------------
+    # Top bar (title + theme toggle)
+    # ------------------------------------------------------------------
+
+    def _create_top_bar(self) -> None:
+        top = tkb.Frame(self.root)
+        top.pack(fill=X, padx=10, pady=(10, 5))
+
+        tkb.Label(
+            top,
+            text="PDF Crawler",
+            font=("Helvetica", 16, "bold"),
+        ).pack(side=LEFT)
+
+        tkb.Label(
+            top,
+            text="— Find and organize your PDFs",
+            font=("Helvetica", 10),
+        ).pack(side=LEFT, padx=(10, 0))
+
+        # Theme toggle
+        theme_frame = tkb.Frame(top)
+        theme_frame.pack(side=RIGHT)
+        tkb.Label(theme_frame, text="Theme:").pack(side=LEFT, padx=(0, 5))
+
+        self.theme_var = tkb.BooleanVar(
+            value=tkb.Style().theme_use() == "darkly"
+        )
+        self.theme_switch = tkb.Checkbutton(
+            theme_frame,
+            text="Dark",
+            variable=self.theme_var,
+            bootstyle="info",
+            command=self._on_theme_toggle,
+        )
+        self.theme_switch.pack(side=LEFT)
+
+    def _on_theme_toggle(self) -> None:
+        is_dark = self.theme_var.get()
+        new_theme = "darkly" if is_dark else "cosmo"
+        try:
+            tkb.Style().theme_use(new_theme)
+            self.settings.set_theme(new_theme)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Search controls
+    # ------------------------------------------------------------------
+
+    def _create_search_section(self) -> None:
+        section = tkb.LabelFrame(self.root, text="Search")
+        section.pack(fill=X, padx=10, pady=5)
+
+        content = tkb.Frame(section)
+        content.pack(fill=X, padx=10, pady=10)
+
+        # Folder row
+        folder_row = tkb.Frame(content)
+        folder_row.pack(fill=X, pady=(0, 8))
+
+        tkb.Label(folder_row, text="Folder:", width=10, anchor=W).pack(
+            side=LEFT, padx=(0, 5)
+        )
+        self.etr_folder = tkb.Entry(folder_row)
+        self.etr_folder.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        self.etr_folder.insert(0, Finder.get_current_folder())
+
+        self.btn_browse = tkb.Button(
+            folder_row,
             text="Browse...",
-            bootstyle="primary-outline",
-            command=self.on_btn_pick_folder_click,
-            width=10
+            command=self.on_browse_folder,
+            width=12,
         )
-        self.btn_pick_folder.pack(side=LEFT)
+        self.btn_browse.pack(side=LEFT, padx=(0, 10))
+
+        # Recent folders combobox
+        self.cmb_recent = tkb.Combobox(
+            folder_row,
+            values=[],
+            width=30,
+            state="readonly",
+        )
+        self.cmb_recent.pack(side=LEFT)
+        self.cmb_recent.bind(
+            "<<ComboboxSelected>>", self._on_recent_folder_selected
+        )
 
         # Filters row
-        filters_frame = tkb.Frame(control_frame)
-        filters_frame.pack(fill=X)
-        
-        # Page size filter
-        page_frame = tkb.Frame(filters_frame)
-        page_frame.pack(side=LEFT, padx=(0, 20))
-        self.lbl_pages = tkb.Label(page_frame, text="Min Pages:", width=10)
-        self.lbl_pages.pack(side=LEFT, padx=(0, 5))
-        self.cmb_page_size = tkb.Combobox(
-            page_frame,
-            values=self.page_size_options,
-            width=8,
-            state="readonly"
-        )
-        self.cmb_page_size.current(0)
-        self.cmb_page_size.pack(side=LEFT)
+        filters_row = tkb.Frame(content)
+        filters_row.pack(fill=X)
 
-        # File size filter
-        size_frame = tkb.Frame(filters_frame)
-        size_frame.pack(side=LEFT, padx=(0, 20))
-        self.lbl_pdf_size = tkb.Label(size_frame, text="Min Size:", width=10)
-        self.lbl_pdf_size.pack(side=LEFT, padx=(0, 5))
-        self.cmb_pdf_size = tkb.Combobox(
-            size_frame,
-            values=self.pdf_size_options,
+        # Page filter
+        pg_frame = tkb.Frame(filters_row)
+        pg_frame.pack(side=LEFT, padx=(0, 20))
+        tkb.Label(pg_frame, text="Pages >:").pack(side=LEFT, padx=(0, 5))
+        self.cmb_pages = tkb.Combobox(
+            pg_frame,
+            values=self.page_size_options,
+            state="readonly",
             width=8,
-            state="readonly"
         )
-        self.cmb_pdf_size.current(0)
-        self.cmb_pdf_size.pack(side=LEFT)
+        self.cmb_pages.current(0)
+        self.cmb_pages.pack(side=LEFT)
+
+        # Size filter
+        sz_frame = tkb.Frame(filters_row)
+        sz_frame.pack(side=LEFT, padx=(0, 20))
+        tkb.Label(sz_frame, text="Size >:").pack(side=LEFT, padx=(0, 5))
+        self.cmb_size = tkb.Combobox(
+            sz_frame,
+            values=self.pdf_size_options,
+            state="readonly",
+            width=8,
+        )
+        self.cmb_size.current(0)
+        self.cmb_size.pack(side=LEFT)
 
         # Duplicate detection
-        dup_frame = tkb.Frame(filters_frame)
+        dup_frame = tkb.Frame(filters_row)
         dup_frame.pack(side=LEFT, padx=(0, 20))
-        self.lbl_detect_duplicates = tkb.Label(dup_frame, text="Detect Duplicates:", width=14)
-        self.lbl_detect_duplicates.pack(side=LEFT, padx=(0, 5))
-        self.cmb_detect_duplicates = tkb.Combobox(
+        self.dup_var = tkb.BooleanVar(value=True)
+        self.chk_duplicates = tkb.Checkbutton(
             dup_frame,
-            values=["NO", "YES"],
-            width=5,
-            state="readonly"
+            text="Detect duplicates",
+            variable=self.dup_var,
         )
-        self.cmb_detect_duplicates.current(0)
-        self.cmb_detect_duplicates.pack(side=LEFT)
+        self.chk_duplicates.pack(side=LEFT, padx=(0, 5))
 
-        # Search button
-        self.btn_find = tkb.Button(
-            filters_frame,
-            text="Start Search",
-            bootstyle="success",
-            command=self.on_btn_find_click,
-            width=15
-        )
-        self.btn_find.pack(side=RIGHT)
+        # Buttons
+        btn_row = tkb.Frame(filters_row)
+        btn_row.pack(side=RIGHT)
 
-    def create_progress_section(self):
-        """Create the progress section with progress bar and status"""
-        progress_frame = tkb.LabelFrame(
-            self.main_container,
-            text="Progress",
-            padding=10,
-            bootstyle=INFO
+        self.btn_search = tkb.Button(
+            btn_row,
+            text="Search",
+            command=self.on_search,
+            width=14,
         )
-        progress_frame.pack(fill=X, pady=(0, 10))
+        self.btn_search.pack(side=LEFT, padx=(0, 5))
+
+        self.btn_cancel = tkb.Button(
+            btn_row,
+            text="Cancel",
+            command=self.on_cancel,
+            width=12,
+            state=DISABLED,
+            bootstyle=WARNING,
+        )
+        self.btn_cancel.pack(side=LEFT)
+
+    # ------------------------------------------------------------------
+    # Progress section
+    # ------------------------------------------------------------------
+
+    def _create_progress_section(self) -> None:
+        section = tkb.Frame(self.root)
+        section.pack(fill=X, padx=10, pady=5)
 
         self.progressbar = tkb.Progressbar(
-            master=progress_frame,
-            mode=INDETERMINATE,
-            bootstyle=(SUCCESS, "striped")
+            section, mode=INDETERMINATE
         )
-        self.progressbar.pack(fill=X, pady=(0, 5))
-        
+        self.progressbar.pack(fill=X, pady=(0, 3))
+
         self.lbl_progress = tkb.Label(
-            progress_frame,
-            text="Ready to start...",
-            wraplength=1200
+            section,
+            text="Ready",
+            wraplength=1200,
         )
         self.lbl_progress.pack(fill=X)
 
-    def create_results_section(self):
-        """Create the results section with table and action buttons"""
-        results_frame = tkb.LabelFrame(
-            self.main_container,
-            text="Results",
-            padding=10,
-            bootstyle=INFO
+    # ------------------------------------------------------------------
+    # Results section
+    # ------------------------------------------------------------------
+
+    def _create_results_section(self) -> None:
+        section = tkb.Frame(self.root)
+        section.pack(fill=BOTH, expand=True, padx=10, pady=5)
+
+        # Search/filter entry
+        search_row = tkb.Frame(section)
+        search_row.pack(fill=X, pady=(0, 3))
+
+        tkb.Label(search_row, text="Filter:").pack(side=LEFT, padx=(0, 5))
+        self.etr_search = tkb.Entry(search_row)
+        self.etr_search.pack(side=LEFT, fill=X, expand=True)
+        self.etr_search.bind("<KeyRelease>", self._on_search_filter)
+
+        # Table
+        table_frame = ScrolledFrame(section)
+        table_frame.pack(fill=BOTH, expand=True, pady=(3, 5))
+
+        # Build treeview
+        self.tree = tkb.Treeview(
+            table_frame,
+            columns=[c[0] for c in self.COLUMNS],
+            show="headings",
+            selectmode="extended",
         )
-        results_frame.pack(fill=BOTH, expand=YES)
 
-        # Create table with scrollable frame
-        table_frame = ScrolledFrame(results_frame)
-        table_frame.pack(fill=BOTH, expand=YES, pady=(0, 10))
+        # Define headings
+        col_defs = []
+        for col_id, text, width, anchor, sort_key in self.COLUMNS:
+            self.tree.heading(
+                col_id,
+                text=text,
+                command=lambda c=col_id: self._on_sort_column(c),
+            )
+            self.tree.column(col_id, width=width, anchor=anchor)
+            col_defs.append(col_id)
 
-        # Configure table columns
-        headings = [
-            {"text": "Size", "width": 100, "anchor": "w"},
-            {"text": "Pages", "width": 80, "anchor": "w"},
-            {"text": "File", "width": 300, "anchor": "w"},
-            {"text": "Full Path", "width": 700, "anchor": "w"},
-        ]
-
-        self.tableview = Tableview(
-            master=table_frame,
-            coldata=headings,
-            searchable=True,
-            bootstyle=PRIMARY,
-            paginated=True,
-            pagesize=25,
-            stripecolor=(self.root.style.colors.light, self.root.style.colors.dark),
+        # Vertical scrollbar
+        scrollbar = tkb.Scrollbar(
+            table_frame, orient="vertical", command=self.tree.yview
         )
-        self.tableview.pack(fill=BOTH, expand=YES)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        # Layout treeview + scrollbar
+        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.pack(side=RIGHT, fill=Y)
+
+        base_font = tkfont.nametofont("TkDefaultFont")
+        invalid_font = base_font.copy()
+        invalid_font.configure(overstrike=1)
+        self.tree.tag_configure(self.INVALID_TAG, font=invalid_font)
+        self.tree.tag_configure(self.DUPLICATE_TAG)
+
+        # Bind double-click for checkbox toggle
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
 
         # Action buttons
-        actions_frame = tkb.Frame(results_frame)
-        actions_frame.pack(fill=X)
+        actions = tkb.Frame(section)
+        actions.pack(fill=X)
 
-        # Left side - Export options
-        export_frame = tkb.Frame(actions_frame)
-        export_frame.pack(side=LEFT)
-        
-        self.btn_export_csv = tkb.Button(
-            export_frame,
-            text="Export to CSV",
-            bootstyle="primary-outline",
-            command=self.on_btn_export_csv_click,
-            state=DISABLED,
-            width=15
-        )
-        self.btn_export_csv.pack(side=LEFT, padx=(0, 10))
+        # Left: select all / deselect all
+        sel_frame = tkb.Frame(actions)
+        sel_frame.pack(side=LEFT)
 
-        # Right side - Copy options
-        copy_frame = tkb.Frame(actions_frame)
-        copy_frame.pack(side=RIGHT)
-        
-        self.rename_var = tkb.BooleanVar(value=False)
-        self.chk_rename = tkb.Checkbutton(
-            copy_frame,
-            text="Rename with Title & Author",
-            variable=self.rename_var,
-            bootstyle="info-toolbutton",
-            width=25
+        self.btn_select_all = tkb.Button(
+            sel_frame,
+            text="Select All",
+            command=self._on_select_all,
+            width=12,
         )
-        self.chk_rename.pack(side=LEFT, padx=(0, 10))
-        
+        self.btn_select_all.pack(side=LEFT, padx=(0, 5))
+
+        self.btn_deselect_all = tkb.Button(
+            sel_frame,
+            text="Deselect All",
+            command=self._on_deselect_all,
+            width=12,
+        )
+        self.btn_deselect_all.pack(side=LEFT)
+
+        # Right: copy + export
+        dest_frame = tkb.Frame(actions)
+        dest_frame.pack(side=RIGHT, padx=(0, 10))
+
+        tkb.Label(dest_frame, text="Destination:").pack(side=LEFT, padx=(0, 5))
+        self.cmb_destination = tkb.Combobox(
+            dest_frame,
+            values=[],
+            width=36,
+            state="readonly",
+        )
+        self.cmb_destination.pack(side=LEFT, padx=(0, 5))
+
+        self.btn_dest_browse = tkb.Button(
+            dest_frame,
+            text="Browse...",
+            command=self._on_pick_destination,
+            width=11,
+        )
+        self.btn_dest_browse.pack(side=LEFT)
+
+        act_frame = tkb.Frame(actions)
+        act_frame.pack(side=RIGHT)
+
         self.btn_copy = tkb.Button(
-            copy_frame,
-            text="Copy Files To...",
-            bootstyle="success-outline",
-            command=self.on_btn_copy_click,
+            act_frame,
+            text="Copy Selected...",
+            command=self.on_copy_selected,
+            width=16,
             state=DISABLED,
-            width=15
+            bootstyle=SUCCESS,
         )
-        self.btn_copy.pack(side=LEFT)
+        self.btn_copy.pack(side=LEFT, padx=(0, 5))
 
-    def on_btn_export_csv_click(self):
-        """Handle CSV export with file dialog"""
-        try:
-            filename = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-                title="Export to CSV"
+        self.btn_csv = tkb.Button(
+            act_frame,
+            text="Export CSV",
+            command=self.on_export_csv,
+            width=14,
+            state=DISABLED,
+        )
+        self.btn_csv.pack(side=LEFT)
+
+    # ------------------------------------------------------------------
+    # Status bar
+    # ------------------------------------------------------------------
+
+    def _create_status_bar(self) -> None:
+        self.status_bar = tkb.Frame(self.root)
+        self.status_bar.pack(fill=X, side=BOTTOM, padx=10, pady=(0, 5))
+
+        self.lbl_status_found = tkb.Label(
+            self.status_bar, text="Found: 0"
+        )
+        self.lbl_status_found.pack(side=LEFT, padx=(0, 20))
+
+        self.lbl_status_duplicates = tkb.Label(
+            self.status_bar, text="Duplicates: 0"
+        )
+        self.lbl_status_duplicates.pack(side=LEFT, padx=(0, 20))
+
+        self.lbl_status_selected = tkb.Label(
+            self.status_bar, text="Selected: 0"
+        )
+        self.lbl_status_selected.pack(side=LEFT, padx=(0, 20))
+
+        self.lbl_status_size = tkb.Label(
+            self.status_bar, text="Size: 0 B"
+        )
+        self.lbl_status_size.pack(side=LEFT)
+
+    # ------------------------------------------------------------------
+    # Keyboard shortcuts
+    # ------------------------------------------------------------------
+
+    def _bind_shortcuts(self) -> None:
+        self.root.bind("<Control-f>", self._on_ctrl_f)
+        self.root.bind("<Control-F>", self._on_ctrl_f)
+        self.root.bind("<Control-o>", self._on_ctrl_o)
+        self.root.bind("<Control-O>", self._on_ctrl_o)
+        self.root.bind("<Control-c>", self._on_ctrl_c)
+        self.root.bind("<Control-C>", self._on_ctrl_c)
+        self.root.bind("<Control-e>", self._on_ctrl_e)
+        self.root.bind("<Control-E>", self._on_ctrl_e)
+        self.root.bind("<Control-a>", self._on_ctrl_a)
+        self.root.bind("<Control-A>", self._on_ctrl_a)
+        self.root.bind("<space>", self._on_space)
+        self.etr_folder.bind("<Return>", self._on_enter_folder)
+
+    def _on_ctrl_f(self, event=None) -> None:
+        self.etr_search.focus_set()
+        self.etr_search.select_range(0, END)
+        return "break"
+
+    def _on_ctrl_o(self, event=None) -> None:
+        self.on_browse_folder()
+        return "break"
+
+    def _on_ctrl_c(self, event=None) -> None:
+        if self.btn_copy.cget("state") != DISABLED:
+            self.on_copy_selected()
+        return "break"
+
+    def _on_ctrl_e(self, event=None) -> None:
+        if self.btn_csv.cget("state") != DISABLED:
+            self.on_export_csv()
+        return "break"
+
+    def _on_ctrl_a(self, event=None) -> None:
+        self._on_select_all()
+        return "break"
+
+    def _on_space(self, event=None) -> None:
+        """Toggle selection on the currently focused tree item."""
+        iid = self.tree.focus()
+        if iid:
+            self._toggle_selection(iid)
+        return "break"
+
+    def _on_enter_folder(self, event=None) -> None:
+        self.on_search()
+        return "break"
+
+    # ------------------------------------------------------------------
+    # Treeview helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_recent_folders(self) -> None:
+        folders = self.settings.get_recent_folders()
+        self.cmb_recent.config(values=folders)
+        if folders:
+            self.cmb_recent.set(folders[0])
+
+    def _refresh_frequent_destinations(self) -> None:
+        folders = self.settings.get_frequent_destinations()
+        self.cmb_destination.config(values=folders)
+        if folders and not self.cmb_destination.get().strip():
+            self.cmb_destination.set(folders[0])
+
+    def _on_pick_destination(self) -> None:
+        folder = filedialog.askdirectory(title="Select Destination Folder")
+        if folder:
+            self.cmb_destination.set(folder)
+
+    def _on_recent_folder_selected(self, event=None) -> None:
+        val = self.cmb_recent.get()
+        if val:
+            self.etr_folder.delete(0, END)
+            self.etr_folder.insert(0, val)
+
+    def _clear_tree(self) -> None:
+        existing_ids = set(self.tree.get_children())
+        existing_ids.update(entry.fullname for entry in self.all_entries)
+        for iid in existing_ids:
+            try:
+                self.tree.delete(iid)
+            except TclError:
+                pass
+
+    def _populate_tree(self, entries: list) -> None:
+        """Populate the treeview with PdfEntry objects."""
+        # Preserve selection
+        saved_selection = self.selected_ids.copy()
+        self._clear_tree()
+        self.all_entries = list(entries)
+        self.selected_ids = set()
+
+        for entry in entries:
+            iid = entry.fullname  # Use full path as item ID (unique)
+            title = entry.info.get("title", "") if entry.info else ""
+            author = entry.info.get("author", "") if entry.info else ""
+            pages = entry.pages if entry.pages is not None else ""
+            size_str = Finder.convert_size(entry.size)
+            if self.current_search_folder:
+                try:
+                    path = str(Path(entry.fullname).relative_to(self.current_search_folder))
+                except ValueError:
+                    path = Path(entry.fullname).name
+            else:
+                path = Path(entry.fullname).name
+            is_selected = iid in saved_selection
+            if is_selected:
+                self.selected_ids.add(iid)
+
+            values = (
+                "☑" if is_selected else "☐",
+                title,
+                author,
+                pages,
+                size_str,
+                path,
             )
-            if filename:
-                self.tableview.export_all_records(filename)
-                messagebox.showinfo("Success", "Data exported successfully!")
-        except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to export data: {str(e)}")
+            tags = []
+            if entry.is_duplicate:
+                tags.append(self.DUPLICATE_TAG)
+            if not entry.is_valid:
+                tags.append(self.INVALID_TAG)
 
-    def on_btn_copy_click(self):
-        """Handle file copy with progress tracking"""
-        target_folder = filedialog.askdirectory(title="Select Destination Folder")
-        if not target_folder:
+            self.tree.insert("", "end", iid=iid, values=values, tags=tuple(tags))
+
+        self.selected_ids &= {entry.fullname for entry in entries}
+        self._apply_search_filter()
+        self._update_status()
+
+    def _apply_search_filter(self) -> None:
+        """Show/hide rows based on search query using Treeview detach/move."""
+        query = self.search_query.strip().lower()
+        self.visible_entry_ids = set()
+        for entry in self.all_entries:
+            iid = entry.fullname
+            values = self.tree.item(iid, "values")
+            haystack = " ".join(str(v).lower() for v in values)
+            match = not query or query in haystack
+            if match:
+                self.tree.move(iid, "", "end")
+                self.visible_entry_ids.add(iid)
+            else:
+                self.tree.detach(iid)
+
+    def _on_search_filter(self, event=None) -> None:
+        self.search_query = self.etr_search.get()
+        self._apply_search_filter()
+        self._update_status()
+
+    def _on_tree_double_click(self, event) -> None:
+        """Toggle checkbox when user double-clicks a tree cell."""
+        col = self.tree.identify_column(event.x)
+        if col == "#1":  # Checkbox column
+            iid = self.tree.identify_row(event.y)
+            if iid:
+                self._toggle_selection(iid)
+
+    def _toggle_selection(self, iid: str) -> None:
+        item = self.tree.item(iid)
+        values = list(item["values"])
+
+        if iid in self.selected_ids:
+            self.selected_ids.discard(iid)
+            values[0] = "☐"
+        else:
+            self.selected_ids.add(iid)
+            values[0] = "☑"
+
+        self.tree.item(iid, values=tuple(values))
+        self._update_status()
+
+    def _get_selected_entries(self) -> list:
+        """Get PdfEntry objects for selected rows."""
+        result = []
+        for entry in self.all_entries:
+            if entry.fullname in self.selected_ids:
+                result.append(entry)
+        return result
+
+    def _on_select_all(self) -> None:
+        for iid in self.tree.get_children():
+            values = list(self.tree.item(iid, "values"))
+            self.selected_ids.add(iid)
+            values[0] = "☑"
+            self.tree.item(iid, values=tuple(values))
+        self._update_status()
+
+    def _on_deselect_all(self) -> None:
+        self.selected_ids = set()
+        for iid in self.tree.get_children():
+            values = list(self.tree.item(iid, "values"))
+            values[0] = "☐"
+            self.tree.item(iid, values=tuple(values))
+        self._update_status()
+
+    def _on_sort_column(self, col_id: str) -> None:
+        if not self.all_entries:
             return
 
-        overwrite = messagebox.askyesno(
-            "Overwrite Files",
-            "Do you want to overwrite existing files?",
-            icon="warning"
-        )
-        
-        rename_with_metadata = self.rename_var.get()
-        
-        # Disable UI elements during copy
-        self._set_ui_state(False)
-        
-        # Configure progress bar
-        self.progressbar.config(
-            mode="determinate",
-            maximum=len(self.finder.validated_pdf_files),
-            value=0
-        )
-        
-        # Start copy operation in background
-        threading.Thread(
-            target=self._run_copy,
-            args=(target_folder, overwrite, rename_with_metadata),
-            daemon=True
-        ).start()
+        # Toggle sort direction
+        if self.sort_column == col_id:
+            self.sort_ascending = not self.sort_ascending
+        else:
+            self.sort_column = col_id
+            self.sort_ascending = False
 
-    def on_btn_pick_folder_click(self):
-        """Handle folder selection with validation"""
-        folder_selected = filedialog.askdirectory(title="Select Search Folder")
-        if folder_selected:
+        # Find the sort key from column config
+        sort_key = None
+        for col_id_def, _, _, _, key in self.COLUMNS:
+            if col_id_def == col_id:
+                sort_key = key
+                break
+
+        if sort_key:
+            self.all_entries.sort(
+                key=lambda e: (
+                    e.__dict__.get(sort_key, "") is None,
+                    e.__dict__.get(sort_key, ""),
+                ),
+                reverse=not self.sort_ascending,
+            )
+            # Rebuild display (preserves selection via saved_ids restore)
+            self._populate_tree(self.all_entries)
+            self.selected_ids &= {entry.fullname for entry in self.all_entries}
+
+    # ------------------------------------------------------------------
+    # Status bar
+    # ------------------------------------------------------------------
+
+    def _update_status(self) -> None:
+        total = len(self.all_entries)
+        duplicates = sum(1 for e in self.all_entries if e.is_duplicate)
+        selected = len(self.selected_ids)
+        selected_size = sum(
+            e.size for e in self.all_entries if e.fullname in self.selected_ids
+        )
+
+        self.lbl_status_found.config(text=f"Found: {total}")
+        self.lbl_status_duplicates.config(text=f"Duplicates: {duplicates}")
+        self.lbl_status_selected.config(text=f"Selected: {selected}")
+        self.lbl_status_size.config(text=f"Size: {Finder.convert_size(selected_size)}")
+
+    def _clear_results_state(self) -> None:
+        self.search_query = ""
+        self.etr_search.delete(0, END)
+        self.selected_ids = set()
+        self.visible_entry_ids = set()
+        self._clear_tree()
+        self.all_entries = []
+        self._update_status()
+
+    # ------------------------------------------------------------------
+    # Operation controls
+    # ------------------------------------------------------------------
+
+    def _set_ui_busy(self, busy: bool) -> None:
+        """Enable/disable controls during operations."""
+        self.ui_busy = busy
+        state = DISABLED if busy else NORMAL
+        ro_state = DISABLED if busy else "readonly"
+
+        self.btn_search.config(state=state)
+        self.btn_browse.config(state=state)
+        if busy:
+            self.btn_copy.config(state=DISABLED)
+            self.btn_csv.config(state=DISABLED)
+        else:
+            has_entries = len(self.all_entries) > 0
+            self.btn_copy.config(state=NORMAL if has_entries else DISABLED)
+            self.btn_csv.config(state=NORMAL if has_entries else DISABLED)
+        self.btn_select_all.config(state=state)
+        self.btn_deselect_all.config(state=state)
+        self.btn_dest_browse.config(state=state)
+        self.chk_duplicates.config(state=state)
+        self.etr_folder.config(state=state)
+        self.cmb_pages.config(state=ro_state)
+        self.cmb_size.config(state=ro_state)
+        self.cmb_recent.config(state=ro_state)
+        self.cmb_destination.config(state=ro_state)
+
+        if busy:
+            self.btn_cancel.config(state=NORMAL)
+        else:
+            self.btn_cancel.config(state=DISABLED)
+            self.operation_cancelled = False
+            self.current_observer = None
+
+    def on_cancel(self) -> None:
+        self.operation_cancelled = True
+        if self.current_observer:
+            self.current_observer.cancel()
+        self.lbl_progress.config(text="Cancelling...")
+
+    def on_browse_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Select Search Folder")
+        if folder:
             self.etr_folder.delete(0, END)
-            self.etr_folder.insert(0, folder_selected)
-            self.finder.current_folder = folder_selected
+            self.etr_folder.insert(0, folder)
 
-    def on_btn_find_click(self):
-        """Handle search operation with validation"""
-        self.folder_selected = self.etr_folder.get()
-        if not os.path.exists(self.folder_selected):
+    def _parse_page_filter(self) -> int | None:
+        val = self.cmb_pages.get()
+        if val == "All":
+            return None
+        return int(val.lstrip(">"))
+
+    def _parse_size_filter(self) -> int | None:
+        val = self.cmb_size.get()
+        if val == "All":
+            return None
+        multiplier = {"MB": 1024 * 1024}[val[-2:]]
+        return int(val[1:-2]) * multiplier
+
+    # ------------------------------------------------------------------
+    # Search operation
+    # ------------------------------------------------------------------
+
+    def on_search(self) -> None:
+        if self.ui_busy:
+            return
+
+        folder = self.etr_folder.get().strip()
+        if not folder or not os.path.isdir(folder):
             messagebox.showerror(
                 "Invalid Folder",
-                f"Folder not found: {self.folder_selected}",
-                icon="error"
+                f"Folder not found: {folder}",
+                icon="error",
             )
             return
 
-        # Disable UI elements during search
-        self._set_ui_state(False)
-        
-        # Configure finder filters
-        self.finder.file_size_filter = self.pdf_size_translate[self.cmb_pdf_size.get()]
-        self.finder.page_size_filter = self.page_size_translate[self.cmb_page_size.get()]
-        
-        # Start search operation in background
-        threading.Thread(target=self._run_find, daemon=True).start()
+        page_filter = self._parse_page_filter()
+        size_filter = self._parse_size_filter()
+        detect = self.dup_var.get()
+        self.current_search_folder = folder
 
-    def _set_ui_state(self, enabled: bool):
-        """Enable/disable UI elements during operations"""
-        state = NORMAL if enabled else DISABLED
-        self.btn_find.config(state=state)
-        self.btn_copy.config(state=state)
-        self.btn_export_csv.config(state=state)
-        self.btn_pick_folder.config(state=state)
-        self.etr_folder.config(state=state)
-        self.cmb_page_size.config(state="readonly" if enabled else DISABLED)
-        self.cmb_pdf_size.config(state="readonly" if enabled else DISABLED)
-        self.cmb_detect_duplicates.config(state="readonly" if enabled else DISABLED)
+        # Save to recent
+        self.settings.add_recent_folder(folder)
+        self._refresh_recent_folders()
 
-    def _run_copy(self, target_folder: str, overwrite: bool, rename_with_metadata: bool = False) -> None:
-        """Execute copy operation with progress tracking"""
+        self._clear_results_state()
+
+        # Set up progress
+        self.progressbar.config(mode=INDETERMINATE)
+        self.progressbar.start(10)
+        self.lbl_progress.config(text="Searching...")
+        self._set_ui_busy(True)
+        self.operation_cancelled = False
+        observer = OperationObserver(self)
+        self.current_observer = observer
+
+        self.operation_thread = threading.Thread(
+            target=self._run_search,
+            args=(folder, page_filter, size_filter, detect, observer),
+            daemon=True,
+        )
+        self.operation_thread.start()
+
+    def _run_search(
+        self,
+        folder: str,
+        page_filter: int | None,
+        size_filter: int | None,
+        detect: bool,
+        observer: "OperationObserver",
+    ) -> None:
         try:
-            self.finder.copy_files(
-                target_folder,
-                overwrite,
-                FileCopyObserver(self.progressbar, self.lbl_progress),
-                rename_with_metadata
+            # Step 1: Find PDFs
+            self._update_progress("Scanning folder for PDFs...")
+            pdf_files = self.finder.find_all_pdf_files(folder, observer)
+
+            if self.operation_cancelled:
+                self._finish_search()
+                return
+
+            if not pdf_files:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "Search Complete", "No PDF files found."
+                    ),
+                )
+                self._finish_search()
+                return
+
+            # Step 2: Validate
+            self._update_progress(
+                f"Validating {len(pdf_files)} PDF files..."
             )
-            messagebox.showinfo("Success", "Files copied successfully!")
-        except Exception as e:
-            messagebox.showerror("Copy Error", f"Failed to copy files: {str(e)}")
-        finally:
-            self._set_ui_state(True)
+            observer.total = len(pdf_files)
+            observer.counter = 0
 
-    def _run_find(self):
-        """Execute search operation with progress tracking"""
+            validated = self.finder.validate_pdfs(
+                pdf_files,
+                page_filter=page_filter,
+                size_filter=size_filter,
+                detect_duplicates=detect,
+                callback=observer,
+            )
+
+            if self.operation_cancelled:
+                self._finish_search()
+                return
+
+            # Step 3: Detect duplicates
+            if detect:
+                self._update_progress("Detecting duplicates...")
+                validated = self.finder.detect_duplicates(validated)
+
+            # Sort by size descending (default)
+            validated.sort(key=lambda e: e.size, reverse=True)
+
+            # Update UI
+            self.root.after(0, lambda: self._on_search_complete(validated))
+
+        except Exception as e:
+            logging.exception("Search error")
+            error_msg = str(e)
+            self.root.after(
+                0,
+                lambda msg=error_msg: messagebox.showerror(
+                    "Search Error", f"An error occurred: {msg}"
+                ),
+            )
+            self._finish_search()
+
+    def _on_search_complete(self, validated: list) -> None:
+        self._populate_tree(validated)
+        self.lbl_progress.config(
+            text=f"Search complete. {len(validated)} PDFs found."
+        )
+        self._reset_progress()
+        self._set_ui_busy(False)
+
+    def _finish_search(self) -> None:
+        self.root.after(0, self._finish_search_ui)
+
+    def _finish_search_ui(self) -> None:
+        self._reset_progress()
+        self._set_ui_busy(False)
+
+    # ------------------------------------------------------------------
+    # Copy operation
+    # ------------------------------------------------------------------
+
+    def on_copy_selected(self) -> None:
+        if self.ui_busy:
+            return
+
+        selected = self._get_selected_entries()
+        if not selected:
+            messagebox.showinfo(
+                "No Selection", "Please select files to copy.", icon=INFO
+            )
+            return
+
+        destination = self.cmb_destination.get().strip()
+        if destination and not os.path.isdir(destination):
+            messagebox.showerror(
+                "Invalid Folder",
+                f"Destination folder not found: {destination}",
+                icon="error",
+            )
+            return
+
+        if not destination:
+            destination = filedialog.askdirectory(title="Select Destination Folder")
+        if not destination:
+            return
+
+        # Save destination
+        self.cmb_destination.set(destination)
+        self.settings.add_frequent_destination(destination)
+        self._refresh_frequent_destinations()
+
+        # Filter out duplicates — copy only unique files
+        files_to_copy = [e for e in selected if not e.is_duplicate]
+        duplicate_count = len(selected) - len(files_to_copy)
+
+        if not files_to_copy:
+            messagebox.showinfo(
+                "No Files to Copy",
+                "All selected files are marked as duplicates.",
+                icon=INFO,
+            )
+            return
+
+        if duplicate_count > 0:
+            self.lbl_progress.config(
+                text=f"{duplicate_count} duplicate(s) will be skipped."
+            )
+
+        self.progressbar.config(mode=INDETERMINATE)
+        self.progressbar.start(10)
+        self.lbl_progress.config(text="Copying files...")
+        self._set_ui_busy(True)
+        self.operation_cancelled = False
+
+        observer = OperationObserver(self)
+        observer.total = len(files_to_copy)
+        observer.counter = 0
+        self.current_observer = observer
+
+        self.operation_thread = threading.Thread(
+            target=self._run_copy,
+            args=(files_to_copy, destination, observer),
+            daemon=True,
+        )
+        self.operation_thread.start()
+
+    def _run_copy(
+        self,
+        files: list,
+        destination: str,
+        observer: "OperationObserver",
+    ) -> None:
         try:
-            print(f"Finding PDFs in {self.etr_folder.get()}...")
-            observer = FileFinderObserver(self.progressbar, self.lbl_progress)
-            
-            # Clear previous results
-            self.tableview.delete_rows()
-            
-            # Find and validate PDFs
-            self.finder.find_all_pdf_files(self.etr_folder.get(), observer)
-            detect_duplicates = self.cmb_detect_duplicates.get() == "YES"
-            
-            if len(self.finder.pdf_files) > 0:
-                observer.counter = 0
-                self.progressbar.config(
-                    mode="determinate",
-                    maximum=len(self.finder.pdf_files),
-                    value=0
-                )
-                
-                # Validate PDFs
-                self.finder.validate_pdfs(observer, detect_duplicates=detect_duplicates)
-                self.finder.validated_pdf_files.sort(key=lambda x: x["size"], reverse=True)
-                
-                # Process results
-                seen_hashes = set()
-                filtered_files = []
-                
-                if detect_duplicates:
-                    duplicate_count = 0
-                    for item in self.finder.validated_pdf_files:
-                        file_hash = item.get("hash")
-                        if file_hash in seen_hashes:
-                            duplicate_count += 1
-                            logging.info(f"{duplicate_count} - Duplicate PDF rejected: {item['fullname']}")
-                            continue
-                        if file_hash and file_hash != "ERROR":
-                            seen_hashes.add(file_hash)
-                            filtered_files.append(item)
-                else:
-                    filtered_files = self.finder.validated_pdf_files
+            copied = self.finder.copy_files(
+                files, destination, callback=observer
+            )
 
-                # Update table
-                self.tableview.pack_forget()
-                for item in filtered_files:
-                    filename = f"{Path(item['fullname']).stem + '.pdf'}"
-                    formatted_size = self.finder.convert_size(item["size"])
-                    self.tableview.insert_row(
-                        "end",
-                        (formatted_size, item["pages"], filename, item["fullname"])
-                    )
-                self.tableview.pack(fill=BOTH, expand=YES)
-                
-                # Enable action buttons
-                self.btn_copy.config(state=NORMAL)
-                self.btn_export_csv.config(state=NORMAL)
-                
-                # Show summary
-                messagebox.showinfo(
-                    "Search Complete",
-                    f"Found {len(filtered_files)} PDF files matching your criteria."
+            if self.operation_cancelled:
+                self.root.after(
+                    0,
+                    lambda: self.lbl_progress.config(
+                        text="Copy cancelled."
+                    ),
+                )
+            else:
+                self.root.after(
+                    0,
+                    lambda copied_count=len(copied): messagebox.showinfo(
+                        "Copy Complete",
+                        f"Successfully copied {copied_count} file(s).",
+                    ),
                 )
         except Exception as e:
-            messagebox.showerror("Search Error", f"An error occurred during search: {str(e)}")
+            logging.exception("Copy error")
+            error_msg = str(e)
+            self.root.after(
+                0,
+                lambda msg=error_msg: messagebox.showerror(
+                    "Copy Error", f"An error occurred: {msg}"
+                ),
+            )
         finally:
-            self._set_ui_state(True)
+            self._finish_copy()
+
+    def _finish_copy(self) -> None:
+        self.root.after(0, self._finish_copy_ui)
+
+    def _finish_copy_ui(self) -> None:
+        self._reset_progress()
+        self._set_ui_busy(False)
+
+    def _reset_progress(self) -> None:
+        self.progressbar.stop()
+        self.progressbar.config(mode=INDETERMINATE, value=0)
+
+    # ------------------------------------------------------------------
+    # CSV export
+    # ------------------------------------------------------------------
+
+    def on_export_csv(self) -> None:
+        # Export all entries currently displayed (respecting search filter)
+        items = list(self.visible_entry_ids)
+
+        if not items:
+            messagebox.showinfo(
+                "No Data", "No PDFs to export.", icon=INFO
+            )
+            return
+
+        output = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Export to CSV",
+        )
+        if not output:
+            return
+
+        try:
+            # Build entries from displayed items
+            entries = []
+            displayed_ids = set(items)
+            for entry in self.all_entries:
+                if entry.fullname in displayed_ids:
+                    entries.append(entry)
+
+            self.finder.save_to_csv(entries, output)
+            messagebox.showinfo("Export Complete", f"Exported {len(entries)} entries to {output}.")
+        except Exception as e:
+            messagebox.showerror(
+                "Export Error", f"Failed to export: {e}"
+            )
+
+    # ------------------------------------------------------------------
+    # Progress helpers (thread-safe via root.after)
+    # ------------------------------------------------------------------
+
+    def _update_progress(self, message: str) -> None:
+        self.root.after(0, lambda: self.lbl_progress.config(text=message))
 
 
-class FileFinderObserver(CallBack):
-    def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
-        self.progress_bar = progress_bar
-        self.label = label
+class OperationObserver(CallBack):
+    """Observer that updates the GUI via root.after for thread safety."""
+
+    def __init__(self, app: PDFCrawler) -> None:
+        super().__init__()
+        self.app = app
         self.counter = 0
+        self.total = 0
 
     def update(self, type: int, message: str) -> None:
+        if self.is_cancelled():
+            return
+
         self.counter += 1
-        self.label.config(text=message)
-        self.progress_bar.step()
-        print(f" >> {self.counter} - {message}")
+        self.app.root.after(
+            0,
+            lambda m=message, c=self.counter, t=self.total: self._update_ui(m, c, t),
+        )
 
+    def _update_ui(self, message: str, count: int, total: int) -> None:
+        if self.app.operation_cancelled:
+            return
 
-class FileCopyObserver(CallBack):
-    def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
-        self.progress_bar = progress_bar
-        self.label = label
-        self.counter = 0
-
-    def update(self, type: int, message: str) -> None:
-        self.counter += 1
-        self.label.config(text=message)
-        self.progress_bar.step()
-        print(f" >> {self.counter} - {message}")
+        if total > 0:
+            max_value = total
+            value = count if count <= total else total
+            self.app.lbl_progress.config(text=f"{message} ({count}/{total})")
+            self.app.progressbar.config(
+                mode="determinate",
+                maximum=max_value,
+                value=value,
+            )
+        else:
+            self.app.lbl_progress.config(text=message)
 
 
 if __name__ == "__main__":
