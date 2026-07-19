@@ -1,150 +1,253 @@
-from operator import call
 import os
+from dataclasses import dataclass, field
+from typing import Optional, Callable, List, Dict, Tuple, Any
 from PyPDF2 import PdfReader
 import csv
 import logging
 import shutil
 import uuid
 import xxhash
-
 from pathlib import Path
 
 logging.basicConfig(level=logging.DEBUG)
 
-
+# Callback constants
 CALLBACK_FILE_FOUND = 1
 CALLBACK_FILE_VALIDATED = 2
+CALLBACK_FILE_COPIED = 3
 
 
 class CallBack:
+    """Progress callback interface."""
+    
     def update(self, type: int, message: str) -> None:
+        """Called with progress updates.
+        
+        Args:
+            type: Callback type (CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CALLBACK_FILE_COPIED)
+            message: Progress message
+        """
         logging.info(f"Type: {type} - Message: {message}")
 
 
+@dataclass
+class PdfEntry:
+    """Represents a PDF file entry with metadata."""
+    fullname: str
+    size: int
+    hash: str
+    pages: Optional[int] = None
+    info: Optional[Dict[str, str]] = None
+    is_duplicate: bool = False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for CSV export."""
+        return {
+            "fullname": self.fullname,
+            "size": self.size,
+            "hash": self.hash,
+            "pages": self.pages or "",
+            "info": str(self.info) if self.info else "",
+            "is_duplicate": self.is_duplicate,
+        }
+
+
 class Finder:
-    pdf_files: list = []
-    validated_pdf_files: list = []
-    file_size_filter: int = 0
-    page_size_filter: int = 0
-
-    def find_all_pdf_files(self, initial_path: str, callback: CallBack) -> list:
-        # Percorre a árvore de diretórios
-        for root, dirs, files in os.walk(initial_path):
-            entry: dict
-            callback.update(CALLBACK_FILE_FOUND, f"Found folder '{root}'...")
+    """Deep module: PDF file discovery, validation, duplicate detection, CSV export, and copy operations.
+    
+    This module provides a clean interface for PDF file operations. All methods return data
+    instead of mutating internal state, making the module testable and thread-safe.
+    """
+    
+    def find_all_pdf_files(
+        self, 
+        folder: str, 
+        callback: Optional[CallBack] = None
+    ) -> List[PdfEntry]:
+        """Discover PDF files in folder.
+        
+        Args:
+            folder: Path to folder to search
+            callback: Optional progress callback
+            
+        Returns:
+            List of PdfEntry objects for each PDF found
+        """
+        pdf_files: List[PdfEntry] = []
+        
+        for root, dirs, files in os.walk(folder):
+            if callback:
+                callback.update(CALLBACK_FILE_FOUND, f"Found folder '{root}'...")
+            
             for file in files:
-                # Verifica se o arquivo é um PDF
                 if file.endswith(".pdf"):
-                    entry = {
-                        "fullname": os.path.join(root, file),
-                        "size": os.path.getsize(os.path.join(root, file)),
-                        "pages": 0,
-                        "info": None,
-                    }
-                    self.pdf_files.append(entry)
-        return self.pdf_files
-
-    def validate_pdfs(self, callback: CallBack, detect_duplicates: bool) -> list:
-        for entry in self.pdf_files:
-            entry["hash"] = "N/A"
+                    fullname = os.path.join(root, file)
+                    entry = PdfEntry(
+                        fullname=fullname,
+                        size=os.path.getsize(fullname),
+                        hash="",  # Will be set during validation
+                        pages=None,
+                        info=None,
+                    )
+                    pdf_files.append(entry)
+        
+        return pdf_files
+    
+    def validate_pdfs(
+        self, 
+        pdf_files: List[PdfEntry],
+        page_filter: Optional[int] = None,
+        size_filter: Optional[int] = None,
+        detect_duplicates: bool = False,
+        callback: Optional[CallBack] = None
+    ) -> List[PdfEntry]:
+        """Validate PDFs, extract metadata, apply filters.
+        
+        Args:
+            pdf_files: List of PdfEntry objects to validate
+            page_filter: Maximum number of pages (None for no filter)
+            size_filter: Maximum file size in bytes (None for no filter)
+            detect_duplicates: Whether to calculate file hash for duplicate detection
+            callback: Optional progress callback
+            
+        Returns:
+            List of validated PdfEntry objects that pass filters
+        """
+        validated: List[PdfEntry] = []
+        
+        for entry in pdf_files:
             try:
-                self.read_pdf_info(entry)
-                if (
-                    entry["size"] > self.file_size_filter
-                    and entry["pages"] > self.page_size_filter
-                ):
-                    self.validated_pdf_files.append(entry)
-                    # --- Calculate xxHash if duplicate detection is enabled ---
-                    if detect_duplicates:
-                        try:
-                            with open(entry["fullname"], "rb") as f:
-                                hasher = xxhash.xxh64()
-                                # Use larger chunks for better performance
-                                chunk_size = 1024 * 1024  # 1MB chunks
-                                while True:
-                                    chunk = f.read(chunk_size)
-                                    if not chunk:
-                                        break
-                                    hasher.update(chunk)
-                                entry["hash"] = hasher.hexdigest()
-                        except Exception as e:
-                            logging.warning(
-                                f"Error calculating hash for {entry['fullname']}: {e}"
-                            )
-                            entry["hash"] = "ERROR"
-                    # --- End xxHash ---
+                self._read_pdf_info(entry)
+                
+                # Apply filters
+                if page_filter is not None and entry.pages is not None and entry.pages > page_filter:
+                    logging.debug(f"Skipping {entry.fullname}: exceeds page filter ({entry.pages} > {page_filter})")
+                    continue
+                
+                if size_filter is not None and entry.size > size_filter:
+                    logging.debug(f"Skipping {entry.fullname}: exceeds size filter ({entry.size} > {size_filter})")
+                    continue
+                
+                # Calculate hash if duplicate detection is enabled
+                if detect_duplicates:
+                    try:
+                        entry.hash = self._calculate_hash(entry.fullname)
+                    except Exception as e:
+                        logging.warning(f"Error calculating hash for {entry.fullname}: {e}")
+                        entry.hash = "N/A"
+                
+                validated.append(entry)
+                
+                if callback:
+                    callback.update(CALLBACK_FILE_VALIDATED, f"Validated '{entry.fullname}' - Hash: {entry.hash}...")
+                    
             except Exception as e:
-                logging.warning(f"Can't open {entry['fullname']}: {e}")
-            callback.update(
-                CALLBACK_FILE_VALIDATED,
-                f"Validated '{entry['fullname']}' - Hash: {entry['hash']}...",
-            )
-        return self.validated_pdf_files
-
-    def read_pdf_info(self, pdf_file: dict) -> dict:
-        complete_entry: dict = pdf_file
-        with open(pdf_file["fullname"], "rb") as f:
-            pdf = PdfReader(f)
-            pdf_file["pages"] = len(pdf.pages)
-            metadata = pdf.metadata
-            # Extract common metadata fields
-            pdf_file["info"] = {
-                "title": getattr(metadata, "title", None) or metadata.get("/Title", ""),
-                "author": getattr(metadata, "author", None)
-                or metadata.get("/Author", ""),
-                "subject": getattr(metadata, "subject", None)
-                or metadata.get("/Subject", ""),
-                "creator": getattr(metadata, "creator", None)
-                or metadata.get("/Creator", ""),
-                "producer": getattr(metadata, "producer", None)
-                or metadata.get("/Producer", ""),
-                "creation_date": getattr(metadata, "creation_date", None)
-                or metadata.get("/CreationDate", ""),
-                "mod_date": getattr(metadata, "modification_date", None)
-                or metadata.get("/ModDate", ""),
-                "raw": dict(metadata) if metadata else {},
-            }
-            complete_entry = pdf_file
-        return complete_entry
-
-    def save_to_csv(self, filename: str) -> None:
-        with open(filename, "w", encoding="utf-8") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=["fullname", "size", "pages", "info", "hash"],
-                dialect="excel",
-            )
-            writer.writeheader()
-            writer.writerows(self.validated_pdf_files)
-            logging.info(f"CSV file '{filename}' saved successfully!")
-
-    def copy_files(
-        self,
-        destination: str,
-        overwrite: bool,
-        callback: CallBack,
-        rename_with_metadata: bool = False,
+                logging.warning(f"Can't open {entry.fullname}: {e}")
+                if callback:
+                    callback.update(CALLBACK_FILE_VALIDATED, f"Failed to validate '{entry.fullname}': {e}")
+        
+        return validated
+    
+    def detect_duplicates(
+        self, 
+        pdf_files: List[PdfEntry]
+    ) -> List[PdfEntry]:
+        """Remove duplicate files based on hash.
+        
+        Entries with 'N/A' hash are ignored (not considered duplicates).
+        The first occurrence of each hash is kept; subsequent duplicates are marked.
+        
+        Args:
+            pdf_files: List of validated PdfEntry objects
+            
+        Returns:
+            List with duplicates marked (is_duplicate=True)
+        """
+        seen_hashes = set()
+        result: List[PdfEntry] = []
+        
+        for entry in pdf_files:
+            # Skip entries with invalid hashes
+            if not entry.hash or entry.hash == "N/A":
+                result.append(entry)
+                continue
+            
+            if entry.hash in seen_hashes:
+                entry.is_duplicate = True
+                logging.debug(f"Duplicate found: {entry.fullname} (hash: {entry.hash})")
+            else:
+                seen_hashes.add(entry.hash)
+            
+            result.append(entry)
+        
+        return result
+    
+    def save_to_csv(
+        self, 
+        pdf_files: List[PdfEntry], 
+        output_path: str
     ) -> None:
-        for entry in self.validated_pdf_files:
-            source_file = entry["fullname"]
-
+        """Export PDF list to CSV file.
+        
+        Args:
+            pdf_files: List of PdfEntry objects to export
+            output_path: Path to output CSV file
+        """
+        with open(output_path, "w", encoding="utf-8", newline="") as f:
+            fieldnames = ["fullname", "size", "pages", "info", "hash", "is_duplicate"]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for entry in pdf_files:
+                writer.writerow(entry.to_dict())
+            
+        logging.info(f"CSV file '{output_path}' saved successfully!")
+    
+    def copy_files(
+        self, 
+        pdf_files: List[PdfEntry],
+        destination: str,
+        overwrite: bool = False,
+        rename_with_metadata: bool = False,
+        callback: Optional[CallBack] = None
+    ) -> List[Tuple[str, str]]:
+        """Copy files to destination.
+        
+        Args:
+            pdf_files: List of PdfEntry objects to copy (non-duplicates recommended)
+            destination: Destination folder path
+            overwrite: Whether to overwrite existing files
+            rename_with_metadata: Whether to rename files using title/author metadata
+            callback: Optional progress callback
+            
+        Returns:
+            List of (source, destination) tuples for successfully copied files
+        """
+        copied: List[Tuple[str, str]] = []
+        
+        for entry in pdf_files:
+            # Skip duplicates unless explicitly included
+            if entry.is_duplicate:
+                logging.debug(f"Skipping duplicate: {entry.fullname}")
+                continue
+            
+            source_file = entry.fullname
+            
             # Skip if source file doesn't exist or is empty
             if not os.path.exists(source_file) or os.path.getsize(source_file) == 0:
                 logging.warning(f"Skipping empty or inaccessible file: '{source_file}'")
                 continue
-
+            
             # Generate destination filename
-            if rename_with_metadata and entry.get("info"):
-                title = entry["info"].get("title", "").strip()
-                base = (
-                    self._sanitize_filename(title) if title else Path(source_file).stem
-                )
+            if rename_with_metadata and entry.info:
+                title = entry.info.get("title", "").strip()
+                base = self._sanitize_filename(title) if title else Path(source_file).stem
             else:
                 base = Path(source_file).stem
-
+            
             filename = f"{base}.pdf"
             destination_file = os.path.join(destination, filename)
-
+            
             # Handle existing files
             if os.path.exists(destination_file):
                 if not overwrite:
@@ -154,52 +257,103 @@ class Finder:
                     try:
                         os.remove(destination_file)
                     except Exception as e:
-                        logging.error(
-                            f"Failed to remove existing file '{destination_file}': {e}"
-                        )
+                        logging.error(f"Failed to remove existing file '{destination_file}': {e}")
                         continue
-
+            
             try:
                 shutil.copyfile(source_file, destination_file)
-                callback.update(
-                    CALLBACK_FILE_VALIDATED,
-                    f"Copied '{source_file}' to '{destination_file}'",
-                )
+                copied.append((source_file, destination_file))
+                
+                if callback:
+                    callback.update(CALLBACK_FILE_COPIED, f"Copied '{source_file}' to '{destination_file}'")
+                    
             except Exception as e:
-                logging.error(
-                    f"Failed to copy '{source_file}' to '{destination_file}': {e}"
-                )
+                logging.error(f"Failed to copy '{source_file}' to '{destination_file}': {e}")
                 if os.path.exists(destination_file):
                     os.remove(destination_file)
-                callback.update(
-                    CALLBACK_FILE_VALIDATED, f"Failed to copy '{source_file}'"
-                )
-
+                if callback:
+                    callback.update(CALLBACK_FILE_COPIED, f"Failed to copy '{source_file}': {e}")
+        
+        return copied
+    
+    def _read_pdf_info(self, entry: PdfEntry) -> PdfEntry:
+        """Read PDF metadata and update entry in place.
+        
+        Args:
+            entry: PdfEntry to update with metadata
+        """
+        with open(entry.fullname, "rb") as f:
+            pdf = PdfReader(f)
+            entry.pages = len(pdf.pages)
+            metadata = pdf.metadata
+            
+            # Extract common metadata fields
+            entry.info = {
+                "title": getattr(metadata, "title", None) or metadata.get("/Title", ""),
+                "author": getattr(metadata, "author", None) or metadata.get("/Author", ""),
+                "subject": getattr(metadata, "subject", None) or metadata.get("/Subject", ""),
+                "creator": getattr(metadata, "creator", None) or metadata.get("/Creator", ""),
+                "producer": getattr(metadata, "producer", None) or metadata.get("/Producer", ""),
+                "creation_date": getattr(metadata, "creation_date", None) or metadata.get("/CreationDate", ""),
+                "mod_date": getattr(metadata, "modification_date", None) or metadata.get("/ModDate", ""),
+                "raw": str(dict(metadata)) if metadata else "",
+            }
+        
+        return entry
+    
+    def _calculate_hash(self, filepath: str) -> str:
+        """Calculate xxHash for a file.
+        
+        Args:
+            filepath: Path to file
+            
+        Returns:
+            Hex digest of xxHash
+        """
+        with open(filepath, "rb") as f:
+            hasher = xxhash.xxh64()
+            chunk_size = 1024 * 1024  # 1MB chunks
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+            return hasher.hexdigest()
+    
     def _sanitize_filename(self, filename: str) -> str:
-        """Sanitize a filename by removing invalid characters and ensuring it's not empty.
-
+        """Sanitize a filename by removing invalid characters.
+        
         Args:
             filename: The filename to sanitize
-
+            
         Returns:
             A sanitized filename that is safe to use
         """
-        # Remove invalid characters and ensure the filename is not empty
         invalid_chars = '<>:"/\\|?*'
         for char in invalid_chars:
             filename = filename.replace(char, "_")
-        # Remove leading/trailing spaces and dots
         filename = filename.strip(". ")
-        # If filename is empty after sanitization, use a default name
         return filename if filename else "untitled"
-
+    
     @staticmethod
     def get_current_folder() -> str:
+        """Get the current working folder.
+        
+        Returns:
+            Absolute path to current folder
+        """
         return os.path.abspath(os.curdir)
-
+    
     @staticmethod
-    def convert_size(size):
-        """Convert bytes to mb or kb depending on scale"""
+    def convert_size(size: int) -> str:
+        """Convert bytes to human-readable format.
+        
+        Args:
+            size: Size in bytes
+            
+        Returns:
+            Formatted size string (e.g., "1.5 MB")
+        """
         kb = size // 1000
         mb = round(kb / 1000, 1)
         if kb > 1000:

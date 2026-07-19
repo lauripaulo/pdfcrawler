@@ -1,5 +1,3 @@
-from ast import Call
-from gc import callbacks
 import os
 import logging
 import threading
@@ -9,10 +7,10 @@ from tkinter import filedialog, messagebox
 
 import ttkbootstrap as tkb
 from ttkbootstrap.constants import PRIMARY, SUCCESS, INDETERMINATE, NORMAL, INFO
-from ttkbootstrap.tableview import Tableview
-from ttkbootstrap.scrolled import ScrolledFrame
+from ttkbootstrap.widgets.tableview import Tableview
+from ttkbootstrap.widgets.scrolled import ScrolledFrame
 
-from engine import CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CallBack, Finder
+from engine import CALLBACK_FILE_FOUND, CALLBACK_FILE_VALIDATED, CALLBACK_FILE_COPIED, CallBack, Finder, PdfEntry
 
 
 class PDFCrawler(tkb.Window):
@@ -25,37 +23,37 @@ class PDFCrawler(tkb.Window):
     }
 
     def __init__(self, root: tkb.Window):
-        root.geometry("1280x800")  # Increased window size
-        root.minsize(1024, 700)    # Set minimum size
+        root.geometry("1280x800")
+        root.minsize(1024, 700)
         root.title("PDF Crawler - Find and Organize Your PDFs")
 
         self.page_size_options = ["All", ">5", ">10", ">20"]
         self.pdf_size_options = ["All", ">1MB", ">5MB", ">10MB"]
-        self.finder = Finder()
-        self.root = root  # Store root window reference
+        self.root = root
+
+        # Store results for later use
+        self.validated_files: list = []
+        self.filtered_files: list = []
 
         # Create main container with padding
         self.main_container = tkb.Frame(root, padding=10)
         self.main_container.pack(fill=BOTH, expand=YES)
 
-        # Create top section for controls
+        # Create sections
         self.create_control_section()
-        
-        # Create middle section for progress
         self.create_progress_section()
-        
-        # Create bottom section for results
         self.create_results_section()
 
     def create_control_section(self):
         """Create the top control section with folder selection and filters"""
-        control_frame = tkb.LabelFrame(
+        tkb.Label(
             self.main_container,
             text="Search Controls",
-            padding=10,
-            bootstyle=INFO
-        )
-        control_frame.pack(fill=X, pady=(0, 10))
+            font=("Helvetica", 12, "bold")
+        ).pack(anchor=W, padx=10, pady=(10, 5))
+        
+        control_frame = tkb.Frame(self.main_container)
+        control_frame.pack(fill=X, padx=10, pady=(0, 10))
 
         # Folder selection row
         folder_frame = tkb.Frame(control_frame)
@@ -65,13 +63,12 @@ class PDFCrawler(tkb.Window):
         self.lbl_folder.pack(side=LEFT, padx=(0, 5))
         
         self.etr_folder = tkb.Entry(folder_frame)
-        self.etr_folder.insert(0, self.finder.get_current_folder())
+        self.etr_folder.insert(0, Finder.get_current_folder())
         self.etr_folder.pack(side=LEFT, fill=X, expand=YES, padx=(0, 5))
         
         self.btn_pick_folder = tkb.Button(
             folder_frame,
             text="Browse...",
-            bootstyle="primary-outline",
             command=self.on_btn_pick_folder_click,
             width=10
         )
@@ -127,7 +124,6 @@ class PDFCrawler(tkb.Window):
         self.btn_find = tkb.Button(
             filters_frame,
             text="Start Search",
-            bootstyle="success",
             command=self.on_btn_find_click,
             width=15
         )
@@ -135,18 +131,18 @@ class PDFCrawler(tkb.Window):
 
     def create_progress_section(self):
         """Create the progress section with progress bar and status"""
-        progress_frame = tkb.LabelFrame(
+        tkb.Label(
             self.main_container,
             text="Progress",
-            padding=10,
-            bootstyle=INFO
-        )
+            font=("Helvetica", 12, "bold")
+        ).pack(anchor=W, padx=10, pady=(10, 5))
+        
+        progress_frame = tkb.Frame(self.main_container)
         progress_frame.pack(fill=X, pady=(0, 10))
 
         self.progressbar = tkb.Progressbar(
             master=progress_frame,
-            mode=INDETERMINATE,
-            bootstyle=(SUCCESS, "striped")
+            mode=INDETERMINATE
         )
         self.progressbar.pack(fill=X, pady=(0, 5))
         
@@ -159,12 +155,13 @@ class PDFCrawler(tkb.Window):
 
     def create_results_section(self):
         """Create the results section with table and action buttons"""
-        results_frame = tkb.LabelFrame(
+        tkb.Label(
             self.main_container,
             text="Results",
-            padding=10,
-            bootstyle=INFO
-        )
+            font=("Helvetica", 12, "bold")
+        ).pack(anchor=W, padx=10, pady=(10, 5))
+        
+        results_frame = tkb.Frame(self.main_container)
         results_frame.pack(fill=BOTH, expand=YES)
 
         # Create table with scrollable frame
@@ -183,7 +180,6 @@ class PDFCrawler(tkb.Window):
             master=table_frame,
             coldata=headings,
             searchable=True,
-            bootstyle=PRIMARY,
             paginated=True,
             pagesize=25,
             stripecolor=(self.root.style.colors.light, self.root.style.colors.dark),
@@ -201,7 +197,6 @@ class PDFCrawler(tkb.Window):
         self.btn_export_csv = tkb.Button(
             export_frame,
             text="Export to CSV",
-            bootstyle="primary-outline",
             command=self.on_btn_export_csv_click,
             state=DISABLED,
             width=15
@@ -217,7 +212,6 @@ class PDFCrawler(tkb.Window):
             copy_frame,
             text="Rename with Title & Author",
             variable=self.rename_var,
-            bootstyle="info-toolbutton",
             width=25
         )
         self.chk_rename.pack(side=LEFT, padx=(0, 10))
@@ -225,7 +219,6 @@ class PDFCrawler(tkb.Window):
         self.btn_copy = tkb.Button(
             copy_frame,
             text="Copy Files To...",
-            bootstyle="success-outline",
             command=self.on_btn_copy_click,
             state=DISABLED,
             width=15
@@ -241,7 +234,11 @@ class PDFCrawler(tkb.Window):
                 title="Export to CSV"
             )
             if filename:
-                self.tableview.export_all_records(filename)
+                # Convert PdfEntry objects to dicts for export
+                file_entries = [PdfEntry(**{k: v for k, v in entry.items()}) 
+                              for entry in self.filtered_files]
+                finder = Finder()
+                finder.save_to_csv(file_entries, filename)
                 messagebox.showinfo("Success", "Data exported successfully!")
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export data: {str(e)}")
@@ -263,30 +260,32 @@ class PDFCrawler(tkb.Window):
         # Disable UI elements during copy
         self._set_ui_state(False)
         
+        # Get non-duplicate files for copy
+        files_to_copy = [f for f in self.filtered_files if not f.get("is_duplicate", False)]
+        
         # Configure progress bar
         self.progressbar.config(
             mode="determinate",
-            maximum=len(self.finder.validated_pdf_files),
+            maximum=len(files_to_copy),
             value=0
         )
         
         # Start copy operation in background
         threading.Thread(
             target=self._run_copy,
-            args=(target_folder, overwrite, rename_with_metadata),
+            args=(target_folder, overwrite, rename_with_metadata, files_to_copy),
             daemon=True
         ).start()
 
     def on_btn_pick_folder_click(self):
-        """Handle folder selection with validation"""
+        """Handle folder selection"""
         folder_selected = filedialog.askdirectory(title="Select Search Folder")
         if folder_selected:
             self.etr_folder.delete(0, END)
             self.etr_folder.insert(0, folder_selected)
-            self.finder.current_folder = folder_selected
 
     def on_btn_find_click(self):
-        """Handle search operation with validation"""
+        """Handle search operation"""
         self.folder_selected = self.etr_folder.get()
         if not os.path.exists(self.folder_selected):
             messagebox.showerror(
@@ -298,10 +297,6 @@ class PDFCrawler(tkb.Window):
 
         # Disable UI elements during search
         self._set_ui_state(False)
-        
-        # Configure finder filters
-        self.finder.file_size_filter = self.pdf_size_translate[self.cmb_pdf_size.get()]
-        self.finder.page_size_filter = self.page_size_translate[self.cmb_page_size.get()]
         
         # Start search operation in background
         threading.Thread(target=self._run_find, daemon=True).start()
@@ -318,16 +313,20 @@ class PDFCrawler(tkb.Window):
         self.cmb_pdf_size.config(state="readonly" if enabled else DISABLED)
         self.cmb_detect_duplicates.config(state="readonly" if enabled else DISABLED)
 
-    def _run_copy(self, target_folder: str, overwrite: bool, rename_with_metadata: bool = False) -> None:
+    def _run_copy(self, target_folder: str, overwrite: bool, rename_with_metadata: bool, files_to_copy: list) -> None:
         """Execute copy operation with progress tracking"""
         try:
-            self.finder.copy_files(
+            finder = Finder()
+            observer = FileCopyObserver(self.progressbar, self.lbl_progress)
+            
+            copied = finder.copy_files(
+                files_to_copy,
                 target_folder,
                 overwrite,
-                FileCopyObserver(self.progressbar, self.lbl_progress),
-                rename_with_metadata
+                rename_with_metadata,
+                observer
             )
-            messagebox.showinfo("Success", "Files copied successfully!")
+            messagebox.showinfo("Success", f"Files copied successfully! ({len(copied)} files)")
         except Exception as e:
             messagebox.showerror("Copy Error", f"Failed to copy files: {str(e)}")
         finally:
@@ -336,51 +335,54 @@ class PDFCrawler(tkb.Window):
     def _run_find(self):
         """Execute search operation with progress tracking"""
         try:
-            print(f"Finding PDFs in {self.etr_folder.get()}...")
+            finder = Finder()
             observer = FileFinderObserver(self.progressbar, self.lbl_progress)
             
             # Clear previous results
             self.tableview.delete_rows()
             
-            # Find and validate PDFs
-            self.finder.find_all_pdf_files(self.etr_folder.get(), observer)
+            # Get filter values
+            page_filter = self.page_size_translate[self.cmb_page_size.get()]
+            size_filter = self.pdf_size_translate[self.cmb_pdf_size.get()]
             detect_duplicates = self.cmb_detect_duplicates.get() == "YES"
             
-            if len(self.finder.pdf_files) > 0:
+            # Find PDFs
+            pdf_files = finder.find_all_pdf_files(self.etr_folder.get(), observer)
+            
+            if len(pdf_files) > 0:
+                # Configure progress bar
                 observer.counter = 0
                 self.progressbar.config(
                     mode="determinate",
-                    maximum=len(self.finder.pdf_files),
+                    maximum=len(pdf_files),
                     value=0
                 )
                 
-                # Validate PDFs
-                self.finder.validate_pdfs(observer, detect_duplicates=detect_duplicates)
-                self.finder.validated_pdf_files.sort(key=lambda x: x["size"], reverse=True)
+                # Validate PDFs with filters
+                validated_files = finder.validate_pdfs(
+                    pdf_files,
+                    page_filter=page_filter if page_filter > 0 else None,
+                    size_filter=size_filter if size_filter > 0 else None,
+                    detect_duplicates=detect_duplicates,
+                    callback=observer
+                )
                 
-                # Process results
-                seen_hashes = set()
-                filtered_files = []
-                
+                # Detect duplicates
                 if detect_duplicates:
-                    duplicate_count = 0
-                    for item in self.finder.validated_pdf_files:
-                        file_hash = item.get("hash")
-                        if file_hash in seen_hashes:
-                            duplicate_count += 1
-                            logging.info(f"{duplicate_count} - Duplicate PDF rejected: {item['fullname']}")
-                            continue
-                        if file_hash and file_hash != "ERROR":
-                            seen_hashes.add(file_hash)
-                            filtered_files.append(item)
-                else:
-                    filtered_files = self.finder.validated_pdf_files
-
+                    validated_files = finder.detect_duplicates(validated_files)
+                
+                # Sort by size (descending)
+                validated_files.sort(key=lambda x: x.size, reverse=True)
+                
+                # Convert to dicts for table display
+                self.validated_files = validated_files
+                self.filtered_files = [f.to_dict() for f in validated_files]
+                
                 # Update table
                 self.tableview.pack_forget()
-                for item in filtered_files:
-                    filename = f"{Path(item['fullname']).stem + '.pdf'}"
-                    formatted_size = self.finder.convert_size(item["size"])
+                for item in self.filtered_files:
+                    filename = f"{Path(item['fullname']).stem}.pdf"
+                    formatted_size = Finder.convert_size(item['size'])
                     self.tableview.insert_row(
                         "end",
                         (formatted_size, item["pages"], filename, item["fullname"])
@@ -392,9 +394,11 @@ class PDFCrawler(tkb.Window):
                 self.btn_export_csv.config(state=NORMAL)
                 
                 # Show summary
+                duplicate_count = sum(1 for f in validated_files if f.is_duplicate)
                 messagebox.showinfo(
                     "Search Complete",
-                    f"Found {len(filtered_files)} PDF files matching your criteria."
+                    f"Found {len(validated_files)} PDF files matching your criteria." +
+                    (f"\n{duplicate_count} duplicates detected." if duplicate_count > 0 else "")
                 )
         except Exception as e:
             messagebox.showerror("Search Error", f"An error occurred during search: {str(e)}")
@@ -403,6 +407,8 @@ class PDFCrawler(tkb.Window):
 
 
 class FileFinderObserver(CallBack):
+    """Observer for file finder operations."""
+    
     def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
         self.progress_bar = progress_bar
         self.label = label
@@ -416,6 +422,8 @@ class FileFinderObserver(CallBack):
 
 
 class FileCopyObserver(CallBack):
+    """Observer for file copy operations."""
+    
     def __init__(self, progress_bar: tkb.Progressbar, label: tkb.Label) -> None:
         self.progress_bar = progress_bar
         self.label = label
