@@ -18,7 +18,18 @@ CALLBACK_FILE_COPIED = 3
 
 
 class CallBack:
-    """Progress callback interface."""
+    """Progress callback interface with cancellation support."""
+    
+    def __init__(self) -> None:
+        self.cancelled = False
+    
+    def cancel(self) -> None:
+        """Signal that the operation should be cancelled."""
+        self.cancelled = True
+    
+    def is_cancelled(self) -> bool:
+        """Check if cancellation was requested."""
+        return self.cancelled
     
     def update(self, type: int, message: str) -> None:
         """Called with progress updates.
@@ -39,17 +50,27 @@ class PdfEntry:
     pages: Optional[int] = None
     info: Optional[Dict[str, str]] = None
     is_duplicate: bool = False
+    is_valid: bool = True  # Whether the PDF was validated successfully
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for CSV export."""
         return {
-            "fullname": self.fullname,
-            "size": self.size,
-            "hash": self.hash,
+            "title": self.info.get("title", "") if self.info else "",
+            "author": self.info.get("author", "") if self.info else "",
             "pages": self.pages or "",
-            "info": str(self.info) if self.info else "",
+            "size": self.size,
+            "size_human": Finder.convert_size(self.size),
+            "fullname": self.fullname,
             "is_duplicate": self.is_duplicate,
+            "hash": self.hash,
+            "is_valid": self.is_valid,
         }
+    
+    def relative_path(self) -> str:
+        """Get the relative path from the parent directory of the file."""
+        return str(Path(self.fullname).relative_to(
+            Path(self.fullname).parent
+        ))
 
 
 class Finder:
@@ -68,7 +89,7 @@ class Finder:
         
         Args:
             folder: Path to folder to search
-            callback: Optional progress callback
+            callback: Optional progress callback with cancellation support
             
         Returns:
             List of PdfEntry objects for each PDF found
@@ -76,10 +97,16 @@ class Finder:
         pdf_files: List[PdfEntry] = []
         
         for root, dirs, files in os.walk(folder):
+            if callback and callback.is_cancelled():
+                break
+            
             if callback:
-                callback.update(CALLBACK_FILE_FOUND, f"Found folder '{root}'...")
+                callback.update(CALLBACK_FILE_FOUND, f"Scanning '{root}'...")
             
             for file in files:
+                if callback and callback.is_cancelled():
+                    break
+                
                 if file.endswith(".pdf"):
                     fullname = os.path.join(root, file)
                     entry = PdfEntry(
@@ -103,29 +130,38 @@ class Finder:
     ) -> List[PdfEntry]:
         """Validate PDFs, extract metadata, apply filters.
         
+        Filters work as MINIMUMS: PDFs with fewer pages or smaller size than the
+        filter value are excluded.
+        
         Args:
             pdf_files: List of PdfEntry objects to validate
-            page_filter: Maximum number of pages (None for no filter)
-            size_filter: Maximum file size in bytes (None for no filter)
+            page_filter: Minimum number of pages (None for no filter)
+            size_filter: Minimum file size in bytes (None for no filter)
             detect_duplicates: Whether to calculate file hash for duplicate detection
-            callback: Optional progress callback
+            callback: Optional progress callback with cancellation support
             
         Returns:
             List of validated PdfEntry objects that pass filters
         """
         validated: List[PdfEntry] = []
+        total = len(pdf_files)
         
-        for entry in pdf_files:
+        for i, entry in enumerate(pdf_files):
+            if callback and callback.is_cancelled():
+                logging.info("Validation cancelled by user")
+                break
+            
             try:
                 self._read_pdf_info(entry)
+                entry.is_valid = True
                 
-                # Apply filters
-                if page_filter is not None and entry.pages is not None and entry.pages > page_filter:
-                    logging.debug(f"Skipping {entry.fullname}: exceeds page filter ({entry.pages} > {page_filter})")
+                # Apply minimum filters: exclude if BELOW the threshold
+                if page_filter is not None and entry.pages is not None and entry.pages < page_filter:
+                    logging.debug(f"Skipping {entry.fullname}: below page filter ({entry.pages} < {page_filter})")
                     continue
                 
-                if size_filter is not None and entry.size > size_filter:
-                    logging.debug(f"Skipping {entry.fullname}: exceeds size filter ({entry.size} > {size_filter})")
+                if size_filter is not None and entry.size < size_filter:
+                    logging.debug(f"Skipping {entry.fullname}: below size filter ({entry.size} < {size_filter})")
                     continue
                 
                 # Calculate hash if duplicate detection is enabled
@@ -139,9 +175,10 @@ class Finder:
                 validated.append(entry)
                 
                 if callback:
-                    callback.update(CALLBACK_FILE_VALIDATED, f"Validated '{entry.fullname}' - Hash: {entry.hash}...")
+                    callback.update(CALLBACK_FILE_VALIDATED, f"Validated '{entry.fullname}' - Hash: {entry.hash}")
                     
             except Exception as e:
+                entry.is_valid = False
                 logging.warning(f"Can't open {entry.fullname}: {e}")
                 if callback:
                     callback.update(CALLBACK_FILE_VALIDATED, f"Failed to validate '{entry.fullname}': {e}")
@@ -189,17 +226,28 @@ class Finder:
     ) -> None:
         """Export PDF list to CSV file.
         
+        Fields: title, author, pages, size (human-readable), fullname, is_duplicate, hash.
+        
         Args:
             pdf_files: List of PdfEntry objects to export
             output_path: Path to output CSV file
         """
         with open(output_path, "w", encoding="utf-8", newline="") as f:
-            fieldnames = ["fullname", "size", "pages", "info", "hash", "is_duplicate"]
+            fieldnames = ["title", "author", "pages", "size", "fullname", "is_duplicate", "hash"]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             
             for entry in pdf_files:
-                writer.writerow(entry.to_dict())
+                d = entry.to_dict()
+                writer.writerow({
+                    "title": d["title"],
+                    "author": d["author"],
+                    "pages": d["pages"],
+                    "size": d["size_human"],
+                    "fullname": d["fullname"],
+                    "is_duplicate": d["is_duplicate"],
+                    "hash": d["hash"],
+                })
             
         logging.info(f"CSV file '{output_path}' saved successfully!")
     
@@ -218,14 +266,18 @@ class Finder:
             destination: Destination folder path
             overwrite: Whether to overwrite existing files
             rename_with_metadata: Whether to rename files using title/author metadata
-            callback: Optional progress callback
+            callback: Optional progress callback with cancellation support
             
         Returns:
             List of (source, destination) tuples for successfully copied files
         """
         copied: List[Tuple[str, str]] = []
         
-        for entry in pdf_files:
+        for i, entry in enumerate(pdf_files):
+            if callback and callback.is_cancelled():
+                logging.info("Copy cancelled by user")
+                break
+            
             # Skip duplicates unless explicitly included
             if entry.is_duplicate:
                 logging.debug(f"Skipping duplicate: {entry.fullname}")
@@ -248,7 +300,7 @@ class Finder:
             filename = f"{base}.pdf"
             destination_file = os.path.join(destination, filename)
             
-            # Handle existing files
+            # Handle existing files — only ask for overwrite on conflict
             if os.path.exists(destination_file):
                 if not overwrite:
                     filename = f"{base}-{uuid.uuid4()}.pdf"

@@ -79,7 +79,7 @@ class TestPdfEntry:
             size=1024,
             hash="abc123",
             pages=5,
-            info={"title": "Test Doc"},
+            info={"title": "Test Doc", "author": "Test Author"},
             is_duplicate=True
         )
         
@@ -89,7 +89,9 @@ class TestPdfEntry:
         assert result["hash"] == "abc123"
         assert result["pages"] == 5
         assert result["is_duplicate"] is True
-        assert "Test Doc" in result["info"]
+        assert result["title"] == "Test Doc"
+        assert result["author"] == "Test Author"
+        assert "MB" in result["size_human"] or "KB" in result["size_human"]
     
     def test_to_dict_empty_pages(self):
         """Test to_dict when pages is None."""
@@ -101,7 +103,8 @@ class TestPdfEntry:
         """Test to_dict when info is None."""
         entry = PdfEntry(fullname="/path/to/file.pdf", size=100, hash="")
         result = entry.to_dict()
-        assert result["info"] == ""
+        assert result["title"] == ""
+        assert result["author"] == ""
 
 
 class TestFinderFindAllPdfFiles:
@@ -149,6 +152,7 @@ class TestFinderFindAllPdfFiles:
         pdf.write_bytes(sample_pdf_content)
         
         mock_callback = Mock()
+        mock_callback.is_cancelled.return_value = False
         finder.find_all_pdf_files(str(temp_dir), callback=mock_callback)
         
         # Should call callback at least once for the root folder
@@ -159,7 +163,7 @@ class TestFinderValidatePdfs:
     """Tests for Finder.validate_pdfs method."""
     
     def test_validate_with_page_filter(self, finder):
-        """Test filtering PDFs by page count."""
+        """Test filtering PDFs by minimum page count."""
         # Mock _read_pdf_info to avoid file I/O
         with patch.object(finder, '_read_pdf_info', return_value=None):
             entries = [
@@ -169,10 +173,10 @@ class TestFinderValidatePdfs:
             
             result = finder.validate_pdfs(entries, page_filter=10)
             assert len(result) == 1
-            assert result[0].pages == 5
+            assert result[0].pages == 15  # min filter: keep pages >= 10
     
     def test_validate_with_size_filter(self, finder):
-        """Test filtering PDFs by file size."""
+        """Test filtering PDFs by minimum file size."""
         # Mock _read_pdf_info to avoid file I/O
         with patch.object(finder, '_read_pdf_info', return_value=None):
             entries = [
@@ -182,7 +186,7 @@ class TestFinderValidatePdfs:
             
             result = finder.validate_pdfs(entries, size_filter=1000)
             assert len(result) == 1
-            assert result[0].size == 500
+            assert result[0].size == 1500  # min filter: keep size >= 1000
     
     def test_validate_no_filter(self, finder):
         """Test validation with no filters applied."""
@@ -194,6 +198,32 @@ class TestFinderValidatePdfs:
             result = finder.validate_pdfs(entries)
             assert len(result) == 1
             mock_read.assert_called_once()
+    
+    def test_validate_minimum_page_filter(self, finder):
+        """Test minimum page filter: files below threshold are excluded."""
+        with patch.object(finder, '_read_pdf_info', return_value=None):
+            entries = [
+                PdfEntry(fullname="/test/test.pdf", size=100, hash="", pages=3),
+                PdfEntry(fullname="/test/test2.pdf", size=100, hash="", pages=7),
+                PdfEntry(fullname="/test/test3.pdf", size=100, hash="", pages=10)
+            ]
+            result = finder.validate_pdfs(entries, page_filter=5)
+            assert len(result) == 2
+            assert result[0].pages == 7
+            assert result[1].pages == 10
+    
+    def test_validate_minimum_size_filter(self, finder):
+        """Test minimum size filter: files below threshold are excluded."""
+        with patch.object(finder, '_read_pdf_info', return_value=None):
+            entries = [
+                PdfEntry(fullname="/test/test.pdf", size=100, hash=""),
+                PdfEntry(fullname="/test/test2.pdf", size=500, hash=""),
+                PdfEntry(fullname="/test/test3.pdf", size=1000, hash="")
+            ]
+            result = finder.validate_pdfs(entries, size_filter=500)
+            assert len(result) == 2
+            assert result[0].size == 500
+            assert result[1].size == 1000
     
     def test_validate_with_duplicate_detection(self, finder):
         """Test validation with duplicate detection enabled."""
@@ -207,6 +237,27 @@ class TestFinderValidatePdfs:
                 assert len(result) == 1
                 assert result[0].hash == "abc123"
                 mock_hash.assert_called_once()
+    
+    def test_validate_cancellation(self, finder):
+        """Test that validation stops when cancelled."""
+        with patch.object(finder, '_read_pdf_info', return_value=None):
+            entries = [
+                PdfEntry(fullname="/test/test.pdf", size=100, hash="", pages=5),
+                PdfEntry(fullname="/test/test2.pdf", size=200, hash="", pages=10),
+                PdfEntry(fullname="/test/test3.pdf", size=300, hash="", pages=15),
+            ]
+            mock_callback = Mock()
+            mock_callback.is_cancelled.return_value = False
+            # Cancel on the second call
+            call_count = [0]
+            def should_cancel():
+                call_count[0] += 1
+                return call_count[0] >= 2
+            mock_callback.is_cancelled.side_effect = should_cancel
+            
+            result = finder.validate_pdfs(entries, callback=mock_callback)
+            # Should stop after processing 1 entry (the second check cancels)
+            assert len(result) == 1
     
     def test_validate_invalid_pdf(self, temp_dir, finder):
         """Test validation of invalid PDF files."""
@@ -227,6 +278,7 @@ class TestFinderValidatePdfs:
                 PdfEntry(fullname="/test/test.pdf", size=100, hash="")
             ]
             mock_callback = Mock()
+            mock_callback.is_cancelled.return_value = False
             finder.validate_pdfs(entries, callback=mock_callback)
             assert mock_callback.update.called
     
@@ -253,6 +305,7 @@ class TestFinderValidatePdfs:
         
         entries = [PdfEntry(fullname=str(invalid_pdf), size=invalid_pdf.stat().st_size, hash="")]
         mock_callback = Mock()
+        mock_callback.is_cancelled.return_value = False
         
         finder.validate_pdfs(entries, callback=mock_callback)
         
@@ -461,6 +514,7 @@ class TestFinderCopyFiles:
         
         entries = [PdfEntry(fullname=str(source), size=source.stat().st_size, hash="")]
         mock_callback = Mock()
+        mock_callback.is_cancelled.return_value = False
         
         finder.copy_files(entries, str(destination), callback=mock_callback)
         
@@ -534,6 +588,7 @@ class TestFinderCopyFiles:
         
         entries = [PdfEntry(fullname=str(source), size=source.stat().st_size, hash="")]
         mock_callback = Mock()
+        mock_callback.is_cancelled.return_value = False
         
         # Mock shutil.copyfile to:
         # 1. Create the destination file (so os.path.exists returns True)
@@ -555,6 +610,33 @@ class TestFinderCopyFiles:
         call_args = mock_callback.update.call_args
         assert call_args[0][0] == CALLBACK_FILE_COPIED
         assert "Failed to copy" in call_args[0][1]
+    
+    def test_copy_cancellation(self, temp_dir, sample_pdf_content, finder):
+        """Test that copy stops when cancelled."""
+        source1 = temp_dir / "test1.pdf"
+        source1.write_bytes(sample_pdf_content)
+        source2 = temp_dir / "test2.pdf"
+        source2.write_bytes(sample_pdf_content)
+        
+        destination = temp_dir / "dest"
+        destination.mkdir()
+        
+        entries = [
+            PdfEntry(fullname=str(source1), size=source1.stat().st_size, hash=""),
+            PdfEntry(fullname=str(source2), size=source2.stat().st_size, hash=""),
+        ]
+        
+        mock_callback = Mock()
+        mock_callback.is_cancelled.return_value = False
+        call_count = [0]
+        def should_cancel():
+            call_count[0] += 1
+            return call_count[0] >= 2
+        mock_callback.is_cancelled.side_effect = should_cancel
+        
+        result = finder.copy_files(entries, str(destination), callback=mock_callback)
+        # Should stop after copying first file (second iteration check cancels)
+        assert len(result) == 1
 
 
 class TestFinderConvertSize:
