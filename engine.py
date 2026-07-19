@@ -287,15 +287,26 @@ class Finder:
             entry.pages = len(pdf.pages)
             metadata = pdf.metadata
             
-            # Extract common metadata fields
+            # Extract common metadata fields.
+            # PyPDF2's creation_date/modification_date properties parse dates with
+            # strptime("D:%Y%m%d%H%M%S%z") which fails on dates without time or timezone
+            # (e.g. "D:20240115"). Read raw strings directly to avoid that.
+            raw_creation = metadata.get("/CreationDate", "") if metadata else ""
+            raw_mod = metadata.get("/ModDate", "") if metadata else ""
+            raw_title = metadata.get("/Title", "") if metadata else ""
+            raw_author = metadata.get("/Author", "") if metadata else ""
+            raw_subject = metadata.get("/Subject", "") if metadata else ""
+            raw_creator = metadata.get("/Creator", "") if metadata else ""
+            raw_producer = metadata.get("/Producer", "") if metadata else ""
+
             entry.info = {
-                "title": getattr(metadata, "title", None) or metadata.get("/Title", ""),
-                "author": getattr(metadata, "author", None) or metadata.get("/Author", ""),
-                "subject": getattr(metadata, "subject", None) or metadata.get("/Subject", ""),
-                "creator": getattr(metadata, "creator", None) or metadata.get("/Creator", ""),
-                "producer": getattr(metadata, "producer", None) or metadata.get("/Producer", ""),
-                "creation_date": getattr(metadata, "creation_date", None) or metadata.get("/CreationDate", ""),
-                "mod_date": getattr(metadata, "modification_date", None) or metadata.get("/ModDate", ""),
+                "title": raw_title.strip() if raw_title else "",
+                "author": raw_author.strip() if raw_author else "",
+                "subject": raw_subject.strip() if raw_subject else "",
+                "creator": raw_creator.strip() if raw_creator else "",
+                "producer": raw_producer.strip() if raw_producer else "",
+                "creation_date": str(raw_creation).strip() if raw_creation else "",
+                "mod_date": str(raw_mod).strip() if raw_mod else "",
                 "raw": str(dict(metadata)) if metadata else "",
             }
         
