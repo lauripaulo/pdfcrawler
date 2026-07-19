@@ -3,7 +3,7 @@ import csv
 import pytest
 from unittest.mock import Mock, patch
 from pathlib import Path
-from engine import Finder, PdfEntry, CallBack
+from engine import Finder, PdfEntry, CallBack, CALLBACK_FILE_VALIDATED, CALLBACK_FILE_COPIED
 
 # Test fixtures
 @pytest.fixture
@@ -229,6 +229,38 @@ class TestFinderValidatePdfs:
             mock_callback = Mock()
             finder.validate_pdfs(entries, callback=mock_callback)
             assert mock_callback.update.called
+    
+    def test_validate_hash_calculation_failure(self, temp_dir, finder, sample_pdf_content):
+        """Test validation when hash calculation fails."""
+        pdf = temp_dir / "test.pdf"
+        pdf.write_bytes(sample_pdf_content)
+        
+        entries = [PdfEntry(fullname=str(pdf), size=pdf.stat().st_size, hash="")]
+        
+        # Mock _read_pdf_info to avoid file I/O and _calculate_hash to raise exception
+        with patch.object(finder, '_read_pdf_info', return_value=None):
+            with patch.object(finder, '_calculate_hash', side_effect=Exception("Hash failed")):
+                result = finder.validate_pdfs(entries, detect_duplicates=True)
+        
+        # Entry should still be included with hash="N/A"
+        assert len(result) == 1
+        assert result[0].hash == "N/A"
+    
+    def test_validate_callback_on_exception(self, temp_dir, finder):
+        """Test that callback is called when validation fails."""
+        invalid_pdf = temp_dir / "invalid.pdf"
+        invalid_pdf.write_bytes(b"not a valid PDF")
+        
+        entries = [PdfEntry(fullname=str(invalid_pdf), size=invalid_pdf.stat().st_size, hash="")]
+        mock_callback = Mock()
+        
+        finder.validate_pdfs(entries, callback=mock_callback)
+        
+        # Callback should be called with error message
+        assert mock_callback.update.called
+        call_args = mock_callback.update.call_args
+        assert call_args[0][0] == CALLBACK_FILE_VALIDATED
+        assert "Failed to validate" in call_args[0][1]
 
 
 class TestFinderDetectDuplicates:
@@ -433,6 +465,96 @@ class TestFinderCopyFiles:
         finder.copy_files(entries, str(destination), callback=mock_callback)
         
         assert mock_callback.update.called
+    
+    def test_copy_skip_empty_files(self, temp_dir, finder):
+        """Test that empty files are skipped during copy."""
+        empty_pdf = temp_dir / "empty.pdf"
+        empty_pdf.write_bytes(b"")
+        
+        destination = temp_dir / "dest"
+        destination.mkdir()
+        
+        entries = [PdfEntry(fullname=str(empty_pdf), size=0, hash="")]
+        result = finder.copy_files(entries, str(destination))
+        
+        assert len(result) == 0
+    
+    def test_copy_rename_with_metadata(self, temp_dir, sample_pdf_content, finder):
+        """Test copying files with metadata-based renaming."""
+        source = temp_dir / "test.pdf"
+        source.write_bytes(sample_pdf_content)
+        
+        destination = temp_dir / "dest"
+        destination.mkdir()
+        
+        entries = [
+            PdfEntry(
+                fullname=str(source),
+                size=source.stat().st_size,
+                hash="",
+                info={"title": "My Document Title"}
+            )
+        ]
+        
+        result = finder.copy_files(entries, str(destination), rename_with_metadata=True)
+        
+        assert len(result) == 1
+        dest_file = destination / "My Document Title.pdf"
+        assert dest_file.exists()
+    
+    def test_copy_overwrite_remove_failure(self, temp_dir, sample_pdf_content, finder):
+        """Test copy when remove of existing file fails."""
+        import os
+        
+        source = temp_dir / "test.pdf"
+        source.write_bytes(sample_pdf_content)
+        
+        destination = temp_dir / "dest"
+        destination.mkdir()
+        
+        existing = destination / "test.pdf"
+        existing.write_bytes(b"existing")
+        
+        entries = [PdfEntry(fullname=str(source), size=source.stat().st_size, hash="")]
+        
+        # Mock os.remove to simulate failure
+        with patch('os.remove', side_effect=PermissionError("Cannot remove")):
+            result = finder.copy_files(entries, str(destination), overwrite=True)
+        
+        # Copy should be skipped
+        assert len(result) == 0
+    
+    def test_copy_exception_handling(self, temp_dir, sample_pdf_content, finder):
+        """Test copy when shutil.copyfile fails."""
+        source = temp_dir / "test.pdf"
+        source.write_bytes(sample_pdf_content)
+        
+        destination = temp_dir / "dest"
+        destination.mkdir()
+        
+        entries = [PdfEntry(fullname=str(source), size=source.stat().st_size, hash="")]
+        mock_callback = Mock()
+        
+        # Mock shutil.copyfile to:
+        # 1. Create the destination file (so os.path.exists returns True)
+        # 2. Then raise an exception
+        def side_effect_with_file_creation(src, dst):
+            # Create the destination file so line 273 is covered
+            with open(dst, 'w') as f:
+                f.write("partial content")
+            raise IOError("Copy failed")
+        
+        with patch('shutil.copyfile', side_effect=side_effect_with_file_creation):
+            result = finder.copy_files(entries, str(destination), callback=mock_callback)
+        
+        # No files should be copied
+        assert len(result) == 0
+        
+        # Callback should report failure
+        assert mock_callback.update.called
+        call_args = mock_callback.update.call_args
+        assert call_args[0][0] == CALLBACK_FILE_COPIED
+        assert "Failed to copy" in call_args[0][1]
 
 
 class TestFinderConvertSize:
@@ -532,43 +654,27 @@ class TestFinderReadPdfInfo:
         with pytest.raises(Exception):
             finder._read_pdf_info(entry)
     
-    def test_read_pdf_info_updates_entry(self, temp_dir, finder):
+    def test_read_pdf_info_updates_entry(self, temp_dir, finder, sample_pdf_content):
         """Test that _read_pdf_info updates the entry in place (integration test)."""
-        # Create a minimal valid PDF
-        pdf_path = temp_dir / "test.pdf"
+        # Create a valid PDF using PyPDF2
+        from PyPDF2 import PdfWriter
         
-        # Use a real minimal PDF structure
-        pdf_content = b"""%PDF-1.4
-1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
-2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
-3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Contents 4 0 R>>endobj
-4 0 obj<</Length 44>>stream
-BT /F1 12 Tf 100 700 Td (Test) Tj ET
-endstream
-endobj
-xref
-0 5
-0000000000 65535 f 
-0000000009 00000 n 
-0000000058 00000 n 
-0000000115 00000 n 
-0000000200 00000 n 
-trailer<</Size 5/Root 1 0 R>>
-startxref
-294
-%%EOF"""
-        pdf_path.write_bytes(pdf_content)
+        pdf_writer = PdfWriter()
+        pdf_writer.add_blank_page(width=612, height=792)
+        
+        pdf_path = temp_dir / "test.pdf"
+        with open(pdf_path, "wb") as f:
+            pdf_writer.write(f)
         
         entry = PdfEntry(fullname=str(pdf_path), size=pdf_path.stat().st_size, hash="")
         
-        try:
-            result = finder._read_pdf_info(entry)
-            # If PDF is valid, pages should be set
-            assert result.pages is not None or result.pages == 0  # May be 0 if parsing fails
-            assert result.info is not None
-        except Exception:
-            # If PDF parsing fails, that's also acceptable for test
-            pass
+        # Call without try/except to ensure return statement is reached
+        result = finder._read_pdf_info(entry)
+        # If PDF is valid, pages should be set
+        assert result.pages is not None or result.pages == 0  # May be 0 if parsing fails
+        assert result.info is not None
+        # Verify the entry is returned (line 302 coverage)
+        assert result is entry
 
 
 class TestFinderGetCurrentFolder:
